@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,7 +16,7 @@ export async function loadModules(client) {
         if (!fs.existsSync(moduleFile)) continue;
 
         try {
-            const moduleExport = await import(`file://${moduleFile}`);
+            const moduleExport = await import(pathToFileURL(moduleFile).href);
             const module = moduleExport.default;
 
             if (!module?.name || !module?.init) continue;

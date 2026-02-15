@@ -9,8 +9,6 @@ export async function loadCommands(client) {
     const commandsPath = path.join(process.cwd(), 'src', 'commands');
       const commandFolders = fs.readdirSync(commandsPath);
 
-        client.commands = new Map();
-
           for (const folder of commandFolders) {
               const commandFile = path.join(commandsPath, folder, 'index.js');
                   if (!fs.existsSync(commandFile)) continue;
