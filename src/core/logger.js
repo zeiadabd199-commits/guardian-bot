@@ -1,5 +1,5 @@
 export const logger = {
-    info: (msg) => console.log(`[INFO] ${msg}`),
-    error: (msg) => console.error(`[ERROR] ${msg}`),
-    warn: (msg) => console.warn(`[WARN] ${msg}`)
+    info: (msg) => console.log(`[${new Date().toISOString()}] [INFO] ${msg}`),
+    warn: (msg) => console.warn(`[${new Date().toISOString()}] [WARN] ${msg}`),
+    error: (msg) => console.error(`[${new Date().toISOString()}] [ERROR] ${msg}`)
 };
