@@ -358,7 +358,7 @@ export async function handleMessageSet(interaction, text) {
 
         await updateGuildConfig(guildId, { modules: { ...config.modules, introduce: { ...ensuredConfig, message: { ...ensuredConfig.message, content: text } } } });
 
-        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Message Updated', description: `Custom message set to:\n\\`\\`\\`${text}\\`\\`\\`` })], ephemeral: true });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Message Updated', description: `Custom message set to:\n\`\`\`${text}\`\`\`` })], ephemeral: true });
 
         logger.info(`Introduce module message updated for guild ${guildId}`);
     } catch (error) {
