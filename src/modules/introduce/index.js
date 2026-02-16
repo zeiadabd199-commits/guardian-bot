@@ -1,4 +1,4 @@
-import { handleEnable, handleDisable, handleView, handleMessageSet, handleEmojiSet, handleEmbedToggle, processIntroduction, sendIntroductionMessage } from './actions.js';
+import { handleEnable, handleDisable, handleView, handleMessageSet, handleEmojiSet, handleEmbedToggle, processIntroduction, sendIntroductionMessage, handleTriggerSet, handleRoleSet, handleChannelSet, handleMessageKeySet } from './actions.js';
 import { isModuleEnabled, checkPermission } from './checker.js';
 import { logger } from '../../core/logger.js';
 
@@ -25,9 +25,13 @@ export default {
         if (subcommandGroup) {
             switch (subcommandGroup) {
                 case 'message': {
+                    // support message.set (legacy) and message.<key> new structure
                     if (subcommand === 'set') {
                         const text = interaction.options.getString('text');
                         await handleMessageSet(interaction, text);
+                    } else if (['success', 'error', 'already', 'dm'].includes(subcommand)) {
+                        const text = interaction.options.getString('text');
+                        await handleMessageKeySet(interaction, subcommand, text);
                     }
                     break;
                 }
@@ -45,11 +49,36 @@ export default {
                     }
                     break;
                 }
+                case 'trigger': {
+                    if (subcommand === 'set') {
+                        const word = interaction.options.getString('word');
+                        await handleTriggerSet(interaction, word);
+                    }
+                    break;
+                }
+                case 'role': {
+                    // subcommands: set_verify, set_pending, set_remove
+                    if (subcommand === 'set_verify') {
+                        const role = interaction.options.getRole('verify_role');
+                        await handleRoleSet(interaction, 'verify', role);
+                    } else if (subcommand === 'set_pending') {
+                        const role = interaction.options.getRole('pending_role');
+                        await handleRoleSet(interaction, 'pending', role);
+                    } else if (subcommand === 'set_remove') {
+                        const role = interaction.options.getRole('remove_role');
+                        await handleRoleSet(interaction, 'remove', role);
+                    }
+                    break;
+                }
+                case 'channel': {
+                    if (subcommand === 'set') {
+                        const channel = interaction.options.getChannel('verify_channel');
+                        await handleChannelSet(interaction, channel);
+                    }
+                    break;
+                }
                 default:
-                    await interaction.reply({
-                        content: 'Unknown subcommand group.',
-                        ephemeral: true,
-                    });
+                    await interaction.reply({ content: 'Unknown subcommand group.', ephemeral: true });
             }
         } else {
             // Handle regular subcommands

@@ -22,8 +22,8 @@ export default {
             const introduce = ensureDefaultConfig(guildConfig.modules?.introduce || {});
             if (!introduce || !introduce.enabled) return;
 
-            // If channel is configured, enforce channel lock
-            if (introduce.channelId && introduce.channelId !== message.channelId) return;
+            // If verify channel is configured, enforce channel lock
+            if (introduce.verifyChannelId && introduce.verifyChannelId !== message.channelId) return;
 
             // If a trigger word is set, only proceed when it matches the message content
             const trigger = introduce.triggerWord ? String(introduce.triggerWord).trim().toLowerCase() : null;
@@ -35,6 +35,7 @@ export default {
                 user: message.author,
                 channel: message.channel,
                 messageObject: message,
+                inputContent: message.content,
                 config: introduce,
             });
 
