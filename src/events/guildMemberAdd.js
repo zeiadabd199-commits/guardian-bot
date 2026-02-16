@@ -1,4 +1,3 @@
-++ 
 import { Events } from 'discord.js';
 import { getGuildConfig } from '../core/database.js';
 import { logger } from '../core/logger.js';

@@ -1,4 +1,3 @@
-++ 
 import { createEmbed } from '../../utils/embedBuilder.js';
 import { getGuildConfig, updateGuildConfig } from '../../core/database.js';
 import { logger } from '../../core/logger.js';

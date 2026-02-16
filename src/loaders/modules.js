@@ -12,6 +12,9 @@ export async function loadModules(client) {
     let loadedCount = 0;
 
     for (const folder of moduleFolders) {
+
+        console.log(`[Guardian] Loading module: ${folder}`);
+
         const moduleFile = path.join(modulesPath, folder, 'index.js');
         if (!fs.existsSync(moduleFile)) continue;
 

@@ -22,14 +22,13 @@ export default {
             const introduce = ensureDefaultConfig(guildConfig.modules?.introduce || {});
             if (!introduce || !introduce.enabled) return;
 
-            // If verify channel is configured, enforce channel lock
+            // Enforce verify channel (if set)
             if (introduce.verifyChannelId && introduce.verifyChannelId !== message.channelId) return;
 
-            // If a trigger word is set, only proceed when it matches the message content
-            const trigger = introduce.triggerWord ? String(introduce.triggerWord).trim().toLowerCase() : null;
-            if (trigger && message.content?.trim().toLowerCase() !== trigger) return;
+            // IMPORTANT:
+            // Do NOT block execution if trigger word is wrong.
+            // processIntroduction will determine success/error and return proper result.
 
-            // Process introduction (pass the original message so reactions/DMs can be applied)
             const result = await introduceModule.processIntroduction({
                 guild: message.guild,
                 user: message.author,
@@ -39,8 +38,15 @@ export default {
                 config: introduce,
             });
 
-            // Send introduction message
-            await introduceModule.sendIntroductionMessage(message.channel, message.author, result, introduce, message);
+            // Send verification response (DM or channel + reactions)
+            await introduceModule.sendIntroductionMessage(
+                message.channel,
+                message.author,
+                result,
+                introduce,
+                message
+            );
+
         } catch (error) {
             logger.error(`Error in messageCreate event: ${error.message}`);
         }
