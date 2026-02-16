@@ -19,6 +19,9 @@ export const moduleSchema = {
                 already: '⚠️',
                 error: '❌',
             },
+            delivery: 'channel',
+            emojiMode: 'inline',
+            },
         },
         description: 'Message configuration',
         nested: {
@@ -60,6 +63,18 @@ export const moduleSchema = {
                         default: '❌',
                         nullable: true,
                         description: 'Emoji for error state',
+                    },
+                    emojiMode: {
+                        type: 'string',
+                        default: 'inline',
+                        nullable: true,
+                        description: 'Emoji display mode: inline or reaction',
+                    },
+                    delivery: {
+                        type: 'string',
+                        default: 'channel',
+                        nullable: true,
+                        description: 'Delivery method: channel or dm',
                     },
                 },
             },
@@ -138,6 +153,12 @@ export const moduleSchema = {
         default: [],
         description: 'Array of user IDs who have been introduced',
     },
+    triggerWord: {
+        type: 'string',
+        default: null,
+        nullable: true,
+        description: 'Optional trigger word to execute the introduction',
+    },
 };
 
 /**
@@ -172,6 +193,8 @@ export function ensureDefaultConfig(existingConfig = {}) {
             type: existingConfig.message?.type ?? existingConfig.message ?? moduleSchema.message.default.type,
             content: existingConfig.message?.content ?? moduleSchema.message.default.content,
             emoji: emojiConfig,
+            delivery: existingConfig.message?.delivery ?? moduleSchema.message.default.delivery,
+            emojiMode: existingConfig.message?.emojiMode ?? moduleSchema.message.default.emojiMode,
         },
         embed: {
             enabled: existingConfig.embed?.enabled ?? existingConfig.embedEnabled ?? moduleSchema.embed.default.enabled,
@@ -186,6 +209,7 @@ export function ensureDefaultConfig(existingConfig = {}) {
             removeRoleId: existingConfig.roles?.removeRoleId ?? moduleSchema.roles.default.removeRoleId,
         },
         introducedUsers: existingConfig.introducedUsers ?? moduleSchema.introducedUsers.default,
+        triggerWord: existingConfig.triggerWord ?? moduleSchema.triggerWord.default,
     };
     return defaults;
 }

@@ -2,6 +2,7 @@ import { Events } from 'discord.js';
 import { getGuildConfig } from '../core/database.js';
 import { logger } from '../core/logger.js';
 import introduceModule from '../modules/introduce/index.js';
+import { ensureDefaultConfig } from '../modules/introduce/config.schema.js';
 
 export default {
     name: Events.MessageCreate,
@@ -17,23 +18,28 @@ export default {
             const guildConfig = await getGuildConfig(message.guildId);
             if (!guildConfig) return;
 
-            // Check if introduce module is enabled
-            const introduce = guildConfig.modules?.introduce;
+            // Ensure full default config
+            const introduce = ensureDefaultConfig(guildConfig.modules?.introduce || {});
             if (!introduce || !introduce.enabled) return;
 
-            // Check if message is in the configured channel
-            if (introduce.channelId !== message.channelId) return;
+            // If channel is configured, enforce channel lock
+            if (introduce.channelId && introduce.channelId !== message.channelId) return;
 
-            // Process introduction
+            // If a trigger word is set, only proceed when it matches the message content
+            const trigger = introduce.triggerWord ? String(introduce.triggerWord).trim().toLowerCase() : null;
+            if (trigger && message.content?.trim().toLowerCase() !== trigger) return;
+
+            // Process introduction (pass the original message so reactions/DMs can be applied)
             const result = await introduceModule.processIntroduction({
                 guild: message.guild,
                 user: message.author,
                 channel: message.channel,
+                messageObject: message,
                 config: introduce,
             });
 
             // Send introduction message
-            await introduceModule.sendIntroductionMessage(message.channel, message.author, result, introduce);
+            await introduceModule.sendIntroductionMessage(message.channel, message.author, result, introduce, message);
         } catch (error) {
             logger.error(`Error in messageCreate event: ${error.message}`);
         }

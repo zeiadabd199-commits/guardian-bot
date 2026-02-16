@@ -14,7 +14,8 @@ import { ensureDefaultConfig } from './config.schema.js';
  */
 export async function processIntroduction(params) {
     const { guild, user, channel, config } = params;
-
+    // messageObject is optional - provided by messageCreate for reaction handling
+    const messageObject = params.messageObject;
     try {
         // Load fresh config from database
         const guildConfig = await getGuildConfig(guild.id);
@@ -34,28 +35,44 @@ export async function processIntroduction(params) {
         }
 
         // Apply roles if configured
-        if (introduce.roles) {
+        if (introduce.roles && (introduce.roles.addRoleId || introduce.roles.removeRoleId)) {
             const member = await guild.members.fetch(user.id).catch(() => null);
             if (member) {
-                if (introduce.roles.addRoleId) {
-                    const addRole = await guild.roles.fetch(introduce.roles.addRoleId).catch(() => null);
-                    if (addRole) {
-                        await member.roles.add(addRole).catch((err) => {
-                            logger.error(`Failed to add role: ${err.message}`);
-                        });
-                    } else {
-                        logger.warn(`Add role ${introduce.roles.addRoleId} not found in guild ${guild.id}`);
+                // Validate bot permissions before attempting role changes
+                const botMember = guild.members.me;
+                if (!botMember || !botMember.permissions.has?.('ManageRoles')) {
+                    logger.warn(`Bot lacks ManageRoles permission in guild ${guild.id}; skipping role changes`);
+                    // Continue without failing the whole introduction; include a warning
+                } else {
+                    if (introduce.roles.addRoleId) {
+                        const addRole = await guild.roles.fetch(introduce.roles.addRoleId).catch(() => null);
+                        if (addRole) {
+                            // Prevent duplicate role assignment
+                            if (!member.roles.cache.has(addRole.id)) {
+                                await member.roles.add(addRole).catch((err) => {
+                                    logger.error(`Failed to add role: ${err.message}`);
+                                });
+                            } else {
+                                logger.info(`Member ${user.id} already has role ${addRole.id} in guild ${guild.id}`);
+                            }
+                        } else {
+                            logger.warn(`Add role ${introduce.roles.addRoleId} not found in guild ${guild.id}`);
+                        }
                     }
-                }
 
-                if (introduce.roles.removeRoleId) {
-                    const removeRole = await guild.roles.fetch(introduce.roles.removeRoleId).catch(() => null);
-                    if (removeRole) {
-                        await member.roles.remove(removeRole).catch((err) => {
-                            logger.error(`Failed to remove role: ${err.message}`);
-                        });
-                    } else {
-                        logger.warn(`Remove role ${introduce.roles.removeRoleId} not found in guild ${guild.id}`);
+                    if (introduce.roles.removeRoleId) {
+                        const removeRole = await guild.roles.fetch(introduce.roles.removeRoleId).catch(() => null);
+                        if (removeRole) {
+                            if (member.roles.cache.has(removeRole.id)) {
+                                await member.roles.remove(removeRole).catch((err) => {
+                                    logger.error(`Failed to remove role: ${err.message}`);
+                                });
+                            } else {
+                                logger.info(`Member ${user.id} does not have role ${removeRole.id} in guild ${guild.id}`);
+                            }
+                        } else {
+                            logger.warn(`Remove role ${introduce.roles.removeRoleId} not found in guild ${guild.id}`);
+                        }
                     }
                 }
             }
@@ -98,23 +115,25 @@ export async function processIntroduction(params) {
  * @param {Object} result - Result from processIntroduction
  * @param {Object} config - Guild introduce config
  */
-export async function sendIntroductionMessage(channel, user, result, config) {
+export async function sendIntroductionMessage(channel, user, result, config, originalMessage = null) {
     try {
-        let content = '';
+        // Ensure result and config are defined
+        const safeResult = result || { status: 'error', message: 'No result', emoji: config?.message?.emoji?.error };
 
-        // Add emoji if available
-        if (result.emoji) {
-            content += `${result.emoji} `;
+        // Build basic content
+        let content = '';
+        if (safeResult.emoji && config?.message?.emojiMode !== 'reaction') {
+            content += `${safeResult.emoji} `;
         }
 
-        // Send based on message type
+        // Prepare the message payload
         if (config.message?.type === 'embed' && config.embed?.enabled) {
             const embedColor = config.embed.color || '#0099FF';
-            const hexColor = parseInt(embedColor.replace('#', ''), 16);
+            const hexColor = parseInt(String(embedColor).replace('#', ''), 16) || 0x0099FF;
 
             const embed = {
                 title: config.embed.title || 'Welcome',
-                description: result.message,
+                description: safeResult.message || config.embed?.description || 'Welcome to the server!',
                 color: hexColor,
                 thumbnail: config.embed.thumbnail ? { url: config.embed.thumbnail } : undefined,
                 image: config.embed.image ? { url: config.embed.image } : undefined,
@@ -122,14 +141,38 @@ export async function sendIntroductionMessage(channel, user, result, config) {
                 timestamp: new Date().toISOString(),
             };
 
-            // Clean up undefined properties
             if (!embed.thumbnail) delete embed.thumbnail;
             if (!embed.image) delete embed.image;
 
-            await channel.send({ embeds: [embed] });
+            // Delivery: DM or channel
+            if (config.message?.delivery === 'dm') {
+                await user.send({ embeds: [embed] }).catch((err) => {
+                    logger.warn(`Failed to DM user ${user.id}: ${err.message}; falling back to channel`);
+                    return channel.send({ embeds: [embed] });
+                });
+            } else {
+                await channel.send({ embeds: [embed] });
+            }
         } else {
-            content += result.message;
-            await channel.send(content);
+            content += safeResult.message || config.message?.content || 'Welcome to the server!';
+
+            if (config.message?.delivery === 'dm') {
+                await user.send(content).catch((err) => {
+                    logger.warn(`Failed to DM user ${user.id}: ${err.message}; falling back to channel`);
+                    return channel.send(content);
+                });
+            } else {
+                await channel.send(content);
+            }
+        }
+
+        // If emoji mode is reaction, attempt to react to the original message
+        if (config.message?.emojiMode === 'reaction' && safeResult.emoji && originalMessage) {
+            try {
+                await originalMessage.react(safeResult.emoji);
+            } catch (err) {
+                logger.warn(`Failed to react with emoji ${safeResult.emoji}: ${err.message}`);
+            }
         }
 
         logger.info(`Introduction message sent for ${user.tag} in guild ${channel.guildId}`);

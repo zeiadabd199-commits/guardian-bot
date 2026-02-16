@@ -11,12 +11,10 @@ const guildConfigSchema = new mongoose.Schema({
         unique: true,
     },
     modules: {
-        introduce: {
-            enabled: { type: Boolean, default: false },
-            channelId: { type: String, default: null },
-            message: { type: String, default: '' },
-            embedEnabled: { type: Boolean, default: true },
-        },
+        // Use a flexible mixed type for module configs so modules can
+        // evolve without strict DB schema changes. Modules are validated
+        // by their own config.schema files in code.
+        introduce: { type: mongoose.Schema.Types.Mixed, default: {} },
     },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
