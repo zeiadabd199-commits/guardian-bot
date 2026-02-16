@@ -1,4 +1,4 @@
-import { handleEnable, handleDisable, handleView } from './actions.js';
+import { handleEnable, handleDisable, handleView, handleMessageSet, handleEmojiSet, handleEmbedToggle } from './actions.js';
 import { isModuleEnabled, checkPermission } from './checker.js';
 import { logger } from '../../core/logger.js';
 
@@ -10,6 +10,7 @@ export default {
     },
     async handleSubcommand(interaction) {
         const subcommand = interaction.options.getSubcommand();
+        const subcommandGroup = interaction.options.getSubcommandGroup(false);
         
         const hasAdmin = await checkPermission(interaction);
         if (!hasAdmin) {
@@ -20,25 +21,58 @@ export default {
             return;
         }
 
-        switch (subcommand) {
-            case 'enable': {
-                const channel = interaction.options.getChannel('channel');
-                await handleEnable(interaction, channel?.id);
-                break;
+        // Handle subcommand groups
+        if (subcommandGroup) {
+            switch (subcommandGroup) {
+                case 'message': {
+                    if (subcommand === 'set') {
+                        const text = interaction.options.getString('text');
+                        await handleMessageSet(interaction, text);
+                    }
+                    break;
+                }
+                case 'emoji': {
+                    if (subcommand === 'set') {
+                        const emoji = interaction.options.getString('emoji');
+                        await handleEmojiSet(interaction, emoji);
+                    }
+                    break;
+                }
+                case 'embed': {
+                    if (subcommand === 'toggle') {
+                        const enabled = interaction.options.getBoolean('enabled');
+                        await handleEmbedToggle(interaction, enabled);
+                    }
+                    break;
+                }
+                default:
+                    await interaction.reply({
+                        content: 'Unknown subcommand group.',
+                        ephemeral: true,
+                    });
             }
-            case 'disable': {
-                await handleDisable(interaction);
-                break;
+        } else {
+            // Handle regular subcommands
+            switch (subcommand) {
+                case 'enable': {
+                    const channel = interaction.options.getChannel('channel');
+                    await handleEnable(interaction, channel?.id);
+                    break;
+                }
+                case 'disable': {
+                    await handleDisable(interaction);
+                    break;
+                }
+                case 'view': {
+                    await handleView(interaction);
+                    break;
+                }
+                default:
+                    await interaction.reply({
+                        content: 'Unknown subcommand.',
+                        ephemeral: true,
+                    });
             }
-            case 'view': {
-                await handleView(interaction);
-                break;
-            }
-            default:
-                await interaction.reply({
-                    content: 'Unknown subcommand.',
-                    ephemeral: true,
-                });
         }
     },
 };

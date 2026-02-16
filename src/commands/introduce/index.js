@@ -25,6 +25,54 @@ export default {
             sub
                 .setName('view')
                 .setDescription('View introduce module configuration')
+        )
+        .addSubcommandGroup(group =>
+            group
+                .setName('message')
+                .setDescription('Manage introduction message')
+                .addSubcommand(sub =>
+                    sub
+                        .setName('set')
+                        .setDescription('Set custom introduction message')
+                        .addStringOption(opt =>
+                            opt
+                                .setName('text')
+                                .setDescription('The message text to display')
+                                .setRequired(true)
+                        )
+                )
+        )
+        .addSubcommandGroup(group =>
+            group
+                .setName('emoji')
+                .setDescription('Manage introduction emoji')
+                .addSubcommand(sub =>
+                    sub
+                        .setName('set')
+                        .setDescription('Set emoji for introduction message')
+                        .addStringOption(opt =>
+                            opt
+                                .setName('emoji')
+                                .setDescription('The emoji to use')
+                                .setRequired(true)
+                        )
+                )
+        )
+        .addSubcommandGroup(group =>
+            group
+                .setName('embed')
+                .setDescription('Manage embed display settings')
+                .addSubcommand(sub =>
+                    sub
+                        .setName('toggle')
+                        .setDescription('Toggle embed display for introduction message')
+                        .addBooleanOption(opt =>
+                            opt
+                                .setName('enabled')
+                                .setDescription('Enable or disable embed display')
+                                .setRequired(true)
+                        )
+                )
         ),
     async execute(interaction) {
         await introduceModule.handleSubcommand(interaction);
