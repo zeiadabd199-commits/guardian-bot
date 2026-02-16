@@ -14,7 +14,11 @@ export const moduleSchema = {
         default: {
             type: 'text',
             content: 'Welcome to the server!',
-            emoji: '👋',
+            emoji: {
+                success: '👋',
+                already: '⚠️',
+                error: '❌',
+            },
         },
         description: 'Message configuration',
         nested: {
@@ -30,10 +34,34 @@ export const moduleSchema = {
                 description: 'Message content',
             },
             emoji: {
-                type: 'string',
-                default: '👋',
+                type: 'object',
+                default: {
+                    success: '👋',
+                    already: '⚠️',
+                    error: '❌',
+                },
                 nullable: true,
-                description: 'Emoji to use in message',
+                description: 'Emojis for different states',
+                nested: {
+                    success: {
+                        type: 'string',
+                        default: '👋',
+                        nullable: true,
+                        description: 'Emoji for successful introduction',
+                    },
+                    already: {
+                        type: 'string',
+                        default: '⚠️',
+                        nullable: true,
+                        description: 'Emoji for already introduced',
+                    },
+                    error: {
+                        type: 'string',
+                        default: '❌',
+                        nullable: true,
+                        description: 'Emoji for error state',
+                    },
+                },
             },
         },
     },
@@ -83,6 +111,33 @@ export const moduleSchema = {
             },
         },
     },
+    roles: {
+        type: 'object',
+        default: {
+            addRoleId: null,
+            removeRoleId: null,
+        },
+        description: 'Role management configuration',
+        nested: {
+            addRoleId: {
+                type: 'string',
+                default: null,
+                nullable: true,
+                description: 'Role ID to add on successful introduction',
+            },
+            removeRoleId: {
+                type: 'string',
+                default: null,
+                nullable: true,
+                description: 'Role ID to remove on successful introduction',
+            },
+        },
+    },
+    introducedUsers: {
+        type: 'array',
+        default: [],
+        description: 'Array of user IDs who have been introduced',
+    },
 };
 
 /**
@@ -90,13 +145,33 @@ export const moduleSchema = {
  * Migrate old fields to new structure if they exist
  */
 export function ensureDefaultConfig(existingConfig = {}) {
+    // Handle legacy emoji format (string) -> new format (object)
+    let emojiConfig = existingConfig.message?.emoji ?? existingConfig.emoji;
+    if (typeof emojiConfig === 'string') {
+        // Migrate from old string format to new object format
+        emojiConfig = {
+            success: emojiConfig,
+            already: moduleSchema.message.default.emoji.already,
+            error: moduleSchema.message.default.emoji.error,
+        };
+    } else if (!emojiConfig || typeof emojiConfig !== 'object') {
+        emojiConfig = moduleSchema.message.default.emoji;
+    } else {
+        // Ensure all properties exist
+        emojiConfig = {
+            success: emojiConfig.success ?? moduleSchema.message.default.emoji.success,
+            already: emojiConfig.already ?? moduleSchema.message.default.emoji.already,
+            error: emojiConfig.error ?? moduleSchema.message.default.emoji.error,
+        };
+    }
+
     const defaults = {
         enabled: existingConfig.enabled ?? moduleSchema.enabled.default,
         channelId: existingConfig.channelId ?? moduleSchema.channelId.default,
         message: {
             type: existingConfig.message?.type ?? existingConfig.message ?? moduleSchema.message.default.type,
             content: existingConfig.message?.content ?? moduleSchema.message.default.content,
-            emoji: existingConfig.message?.emoji ?? existingConfig.emoji ?? moduleSchema.message.default.emoji,
+            emoji: emojiConfig,
         },
         embed: {
             enabled: existingConfig.embed?.enabled ?? existingConfig.embedEnabled ?? moduleSchema.embed.default.enabled,
@@ -106,6 +181,11 @@ export function ensureDefaultConfig(existingConfig = {}) {
             image: existingConfig.embed?.image ?? moduleSchema.embed.default.image,
             thumbnail: existingConfig.embed?.thumbnail ?? moduleSchema.embed.default.thumbnail,
         },
+        roles: {
+            addRoleId: existingConfig.roles?.addRoleId ?? moduleSchema.roles.default.addRoleId,
+            removeRoleId: existingConfig.roles?.removeRoleId ?? moduleSchema.roles.default.removeRoleId,
+        },
+        introducedUsers: existingConfig.introducedUsers ?? moduleSchema.introducedUsers.default,
     };
     return defaults;
 }
