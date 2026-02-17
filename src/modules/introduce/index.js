@@ -1,4 +1,4 @@
-import { handleEnable, handleDisable, handleView, handleMessageSet, handleEmojiSet, handleEmbedToggle, processIntroduction, sendIntroductionMessage, handleTriggerSet, handleRoleSet, handleChannelSet, handleMessageKeySet } from './actions.js';
+import { handleEnable, handleDisable, handleView, handleMessageSet, handleEmojiSet, handleEmbedToggle, processIntroduction, sendIntroductionMessage, handleTriggerSet, handleRoleSet, handleChannelSet, handleMessageKeySet, handleDeliverySet, handleStateEmbedSet } from './actions.js';
 import { isModuleEnabled, checkPermission } from './checker.js';
 import { logger } from '../../core/logger.js';
 
@@ -104,7 +104,9 @@ export default {
             }
         }
     },
-    // Export functions for external use (like messageCreate event)
+    // Export functions for external use (like messageCreate event) and new handlers
     processIntroduction,
     sendIntroductionMessage,
+    handleDeliverySet,
+    handleStateEmbedSet,
 };
