@@ -3,7 +3,7 @@ import introduceModule from '../../modules/introduce/index.js';
 
 export default {
     data: new SlashCommandBuilder()
-        .setName('introduce')
+        .setName('gateway')
         .setDescription('Manage the introduce module')
         .addSubcommand(sub =>
             sub
@@ -25,6 +25,11 @@ export default {
             sub
                 .setName('view')
                 .setDescription('View introduce module configuration')
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('stats')
+                .setDescription('View gateway statistics')
         )
         .addSubcommandGroup(group =>
             group

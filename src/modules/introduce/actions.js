@@ -2,609 +2,385 @@ import { createEmbed } from '../../utils/embedBuilder.js';
 import { getGuildConfig, updateGuildConfig } from '../../core/database.js';
 import { logger } from '../../core/logger.js';
 import { ensureDefaultConfig } from './config.schema.js';
+import { calculateGatewayTrustScore } from './trustScore.js';
+
+// Memory caches for rate-limiting and raid detection
+const rateLimitMap = new Map();
+const guildAttempts = new Map();
+const guildLocks = new Map();
+
+function now() { return Date.now(); }
+function pruneOld(arr, ms) { const cutoff = now() - ms; while (arr.length && arr[0] < cutoff) arr.shift(); }
+
+async function setGatewayLock(guildId, minutes) {
+    try {
+        const ms = Math.max(1, minutes) * 60 * 1000;
+        const unlockAt = Date.now() + ms;
+        guildLocks.set(guildId, { locked: true, unlockAt });
+
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return;
+        const existing = cfg.modules?.introduce || {};
+        const intro = ensureDefaultConfig(existing);
+        intro.stats = intro.stats || {};
+        intro.stats.gatewayLocked = true;
+        intro.stats.lockUntil = unlockAt;
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, introduce: intro } });
+
+        setTimeout(async () => {
+            guildLocks.delete(guildId);
+            const cfg2 = await getGuildConfig(guildId);
+            if (!cfg2) return;
+            const intro2 = ensureDefaultConfig(cfg2.modules?.introduce || {});
+            intro2.stats.gatewayLocked = false;
+            intro2.stats.lockUntil = null;
+            await updateGuildConfig(guildId, { modules: { ...cfg2.modules, introduce: intro2 } });
+        }, ms);
+    } catch (err) {
+        logger.error(`Failed to set gateway lock for ${guildId}: ${err.message}`);
+    }
+}
+
+async function incrementStats(guildId, field) {
+    try {
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return null;
+        const existing = cfg.modules?.introduce || {};
+        const intro = ensureDefaultConfig(existing);
+        intro.stats = intro.stats || { totalVerified: 0, totalBlocked: 0, todayVerified: 0, todayBlocked: 0 };
+        if (field === 'verified') {
+            intro.stats.totalVerified = (intro.stats.totalVerified || 0) + 1;
+            intro.stats.todayVerified = (intro.stats.todayVerified || 0) + 1;
+        } else if (field === 'blocked') {
+            intro.stats.totalBlocked = (intro.stats.totalBlocked || 0) + 1;
+            intro.stats.todayBlocked = (intro.stats.todayBlocked || 0) + 1;
+        }
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, introduce: intro } });
+        return intro.stats;
+    } catch (err) {
+        logger.error(`incrementStats error: ${err.message}`);
+        return null;
+    }
+}
 
 /**
- * Role-based verification processing.
- * - Uses roles to determine verification state (no introducedUsers array)
- * - Validates triggerWord (case-insensitive exact match)
- * - Returns state message config for delivery
+ * Process verification with full security engine
  */
 export async function processIntroduction(params) {
     const { guild, user, channel, config } = params;
     const messageObject = params.messageObject || null;
 
     try {
-        const guildConfig = await getGuildConfig(guild.id);
-        if (!guildConfig) {
-            return {
-                status: 'error',
-                stateKey: 'error',
-                message: config?.messages?.error?.text ?? 'Failed to load configuration',
-                messageConfig: config?.messages?.error,
-            };
+        const cfg = await getGuildConfig(guild.id);
+        if (!cfg) return { status: 'error', message: 'Failed to load configuration', emoji: config?.message?.emoji?.error };
+        const introduce = ensureDefaultConfig(cfg.modules?.introduce || {});
+
+        // Gateway lock check
+        if (introduce.stats?.gatewayLocked) {
+            const until = introduce.stats.lockUntil;
+            if (until && Date.now() < until) {
+                return { status: 'gateway_locked', message: 'Gateway temporarily locked', emoji: introduce.message?.emoji?.error };
+            }
         }
 
-        const introduce = ensureDefaultConfig(guildConfig.modules?.introduce || {});
+        // Already verified check
+        if (introduce.introducedUsers && introduce.introducedUsers.includes(user.id)) {
+            return { status: 'already', message: `${user.username} already verified`, emoji: introduce.message?.emoji?.already };
+        }
 
+        // Member fetch
         const member = await guild.members.fetch(user.id).catch(() => null);
 
-        if (introduce.roles?.verifyRoleId && member && member.roles.cache.has(introduce.roles.verifyRoleId)) {
-            return {
-                status: 'already',
-                stateKey: 'already',
-                message: introduce.messages.already.text,
-                messageConfig: introduce.messages.already,
-            };
-        }
-
-        if (introduce.triggerWord) {
-            const incoming = String(params.inputContent ?? (messageObject ? messageObject.content : '')).trim().toLowerCase();
-            const trigger = String(introduce.triggerWord).trim().toLowerCase();
-            if (incoming !== trigger) {
-                return {
-                    status: 'error',
-                    stateKey: 'error',
-                    message: introduce.messages.error.text,
-                    messageConfig: introduce.messages.error,
-                };
+        // Bypass roles check
+        if (member && Array.isArray(introduce.roles?.bypassRoles) && introduce.roles.bypassRoles.some(r => member.roles.cache.has(r))) {
+            if (introduce.roles?.verifiedRoleId) {
+                const vr = await guild.roles.fetch(introduce.roles.verifiedRoleId).catch(() => null);
+                if (vr && !member.roles.cache.has(vr.id)) {
+                    await member.roles.add(vr).catch(e => logger.error(`Failed adding bypass verified role: ${e.message}`));
+                }
             }
+            const updated = [...(introduce.introducedUsers || []), user.id];
+            await updateGuildConfig(guild.id, { modules: { ...cfg.modules, introduce: { ...introduce, introducedUsers: updated } } });
+            await incrementStats(guild.id, 'verified');
+            return { status: 'success', message: 'Bypassed verification', emoji: introduce.message?.emoji?.success };
         }
 
+        // Account age check
+        const accountAgeDays = Math.floor((Date.now() - new Date(user.createdAt).getTime()) / (1000 * 60 * 60 * 24));
+        if (accountAgeDays < (introduce.security?.minAccountAgeDays || 0)) {
+            await incrementStats(guild.id, 'blocked');
+            return { status: 'blocked_account_age', message: 'Account too new', emoji: introduce.message?.emoji?.error };
+        }
+
+        // Join age check
+        const joinAgeMinutes = member && member.joinedAt ? Math.floor((Date.now() - new Date(member.joinedAt).getTime()) / (1000 * 60)) : Infinity;
+        if (joinAgeMinutes < (introduce.security?.minJoinMinutes || 0)) {
+            await incrementStats(guild.id, 'blocked');
+            return { status: 'blocked_join_age', message: 'Joined too recently', emoji: introduce.message?.emoji?.error };
+        }
+
+        // Per-user rate limit
+        const rlKey = `${guild.id}:${user.id}`;
+        const userArr = rateLimitMap.get(rlKey) || [];
+        pruneOld(userArr, 60 * 1000);
+        userArr.push(now());
+        rateLimitMap.set(rlKey, userArr);
+        if (userArr.length > (introduce.security?.rateLimitPerMinute || 3)) {
+            const gArr = guildAttempts.get(guild.id) || [];
+            pruneOld(gArr, 60 * 1000);
+            gArr.push(now());
+            guildAttempts.set(guild.id, gArr);
+            await incrementStats(guild.id, 'blocked');
+            return { status: 'blocked_spam', message: 'Rate limited', emoji: introduce.message?.emoji?.error };
+        }
+
+        // Raid detection
+        const gArr = guildAttempts.get(guild.id) || [];
+        pruneOld(gArr, 60 * 1000);
+        gArr.push(now());
+        guildAttempts.set(guild.id, gArr);
+        if (introduce.security?.autoLockOnRaid && gArr.length > (introduce.security?.raidThresholdPerMinute || 15)) {
+            await setGatewayLock(guild.id, introduce.security.lockDurationMinutes || 10);
+            return { status: 'gateway_locked', message: 'Gateway locked due to raid', emoji: introduce.message?.emoji?.error };
+        }
+
+        // Role flow: assign new account role if needed
+        if (member && introduce.roles?.newAccountRoleId && accountAgeDays < 7) {
+            const nr = await guild.roles.fetch(introduce.roles.newAccountRoleId).catch(() => null);
+            if (nr && !member.roles.cache.has(nr.id)) await member.roles.add(nr).catch(e => logger.error(e.message));
+        }
+
+        // Suspicious heuristic
+        if (member && introduce.roles?.suspiciousRoleId && accountAgeDays < ((introduce.security?.minAccountAgeDays || 0) * 2)) {
+            const sr = await guild.roles.fetch(introduce.roles.suspiciousRoleId).catch(() => null);
+            if (sr && !member.roles.cache.has(sr.id)) await member.roles.add(sr).catch(e => logger.error(e.message));
+        }
+
+        // Success: assign verified and remove pending roles
+        if (member && introduce.roles?.verifiedRoleId) {
+            const vr = await guild.roles.fetch(introduce.roles.verifiedRoleId).catch(() => null);
+            if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(e.message));
+        }
         if (member) {
-            const botMember = guild.members.me;
-            const canManageRoles = botMember && botMember.permissions.has?.('ManageRoles');
-
-            if (!canManageRoles) {
-                logger.warn(`Bot lacks ManageRoles in guild ${guild.id}; role changes skipped`);
-            } else {
-                if (introduce.roles?.pendingRoleId) {
-                    const pending = await guild.roles.fetch(introduce.roles.pendingRoleId).catch(() => null);
-                    if (pending && member.roles.cache.has(pending.id)) {
-                        await member.roles.remove(pending).catch(err => logger.error(`Failed removing pending role: ${err.message}`));
-                    }
-                }
-
-                if (introduce.roles?.removeRoleId) {
-                    const rem = await guild.roles.fetch(introduce.roles.removeRoleId).catch(() => null);
-                    if (rem && member.roles.cache.has(rem.id)) {
-                        await member.roles.remove(rem).catch(err => logger.error(`Failed removing removeRoleId: ${err.message}`));
-                    }
-                }
-
-                if (introduce.roles?.verifyRoleId) {
-                    const verifyRole = await guild.roles.fetch(introduce.roles.verifyRoleId).catch(() => null);
-                    if (verifyRole && !member.roles.cache.has(verifyRole.id)) {
-                        await member.roles.add(verifyRole).catch(err => logger.error(`Failed adding verify role: ${err.message}`));
-                    }
-                }
+            if (introduce.roles?.suspiciousRoleId) {
+                const sr = await guild.roles.fetch(introduce.roles.suspiciousRoleId).catch(() => null);
+                if (sr && member.roles.cache.has(sr.id)) await member.roles.remove(sr).catch(e => logger.error(e.message));
+            }
+            if (introduce.roles?.newAccountRoleId) {
+                const nr = await guild.roles.fetch(introduce.roles.newAccountRoleId).catch(() => null);
+                if (nr && member.roles.cache.has(nr.id)) await member.roles.remove(nr).catch(e => logger.error(e.message));
             }
         }
 
-        return {
-            status: 'success',
-            stateKey: 'success',
-            message: introduce.messages.success.text,
-            messageConfig: introduce.messages.success,
+        // Calculate gateway trust score
+        const verificationMeta = {
+            attempts: 1,
+            verificationTimeMs: member && member.joinedAt ? (Date.now() - new Date(member.joinedAt).getTime()) : 0,
         };
+        const trustScoreResult = calculateGatewayTrustScore(member, verificationMeta);
+
+        // Track user and store trust score
+        const updatedIntroduced = [...(introduce.introducedUsers || []), user.id];
+        introduce.memberScores = introduce.memberScores || {};
+        introduce.memberScores[user.id] = {
+            score: trustScoreResult.score,
+            risk: trustScoreResult.risk,
+            calculatedAt: Date.now(),
+        };
+        await updateGuildConfig(guild.id, { modules: { ...cfg.modules, introduce: { ...introduce, introducedUsers: updatedIntroduced } } });
+        await incrementStats(guild.id, 'verified');
+
+        logger.info(`Gateway score for ${user.id}: ${trustScoreResult.score} (${trustScoreResult.risk})`);
+
+        return { status: 'success', message: introduce.message?.content || 'Verified', emoji: introduce.message?.emoji?.success };
     } catch (err) {
-        logger.error(`Error processing verification: ${err.message}`);
-        return {
-            status: 'error',
-            stateKey: 'error',
-            message: config?.messages?.error?.text ?? 'An error occurred during verification.',
-            messageConfig: config?.messages?.error,
-        };
+        logger.error(`processIntroduction error: ${err.message}`);
+        return { status: 'error', message: 'Internal error', emoji: config?.message?.emoji?.error };
     }
 }
 
 /**
- * Send verification response message according to state config
- * Handles delivery modes: 'channel', 'dm', 'both'
- * Includes embed rendering with per-state customization
+ * Send verification message with template support, delivery modes, and logging
  */
 export async function sendIntroductionMessage(channel, user, result, config, originalMessage = null) {
     try {
-        const introduce = ensureDefaultConfig(config || {});
-        const messageConfig = result?.messageConfig || introduce.messages.error;
-        const stateKey = result?.stateKey || 'error';
+        const intro = ensureDefaultConfig(config || {});
+        const safeResult = result || { status: 'error', message: 'No result', emoji: intro.message?.emoji?.error };
 
-        if (!messageConfig) {
-            logger.warn(`No message config for state: ${stateKey}`);
-            return;
-        }
-
-        const textContent = messageConfig.text || '';
-        const deliveryMode = messageConfig.delivery || 'channel';
-        const reactionEmoji = messageConfig.reaction || null;
-        const embedConfig = messageConfig.embed || {};
-
-        const buildMessage = () => {
-            if (embedConfig.enabled) {
-                const embedColor = embedConfig.color || '#0099FF';
-                const hexColor = parseInt(embedColor.replace('#', ''), 16);
-
-                return {
-                    content: '',
-                    embeds: [
-                        {
-                            title: embedConfig.title || 'Verification',
-                            description: textContent,
-                            color: hexColor,
-                            thumbnail: embedConfig.thumbnail ? { url: embedConfig.thumbnail } : undefined,
-                            image: embedConfig.image ? { url: embedConfig.image } : undefined,
-                            footer: { text: `User: ${user.tag}` },
-                            timestamp: new Date().toISOString(),
-                        },
-                    ]
-                };
-            } else {
-                return { content: textContent };
-            }
+        // Template replacements
+        const replacements = {
+            '{user}': user.username,
+            '{mention}': `<@${user.id}>`,
+            '{server}': channel.guild?.name || '',
+            '{accountAge}': (() => Math.floor((Date.now() - new Date(user.createdAt).getTime()) / (1000*60*60*24)) + 'd')(),
+            '{joinAge}': (() => {
+                const m = channel.guild?.members.cache.get(user.id);
+                if (!m || !m.joinedAt) return 'N/A';
+                return Math.floor((Date.now() - new Date(m.joinedAt).getTime())/(1000*60)) + 'm';
+            })(),
+            '{guildMemberCount}': String(channel.guild?.memberCount || 0),
+            '{verifiedRole}': intro.roles?.verifiedRoleId ? `<@&${intro.roles.verifiedRoleId}>` : 'None',
         };
+        const apply = (s) => { if (!s) return ''; let out = String(s); Object.entries(replacements).forEach(([k,v]) => { out = out.split(k).join(v); }); return out; };
 
-        const messagePayload = buildMessage();
+        const emojiInline = (safeResult.emoji && intro.message?.emojiMode !== 'reaction') ? `${safeResult.emoji} ` : '';
+        const delivery = intro.message?.delivery || 'channel';
+        const toDM = delivery === 'dm' || delivery === 'both';
+        const toChannel = delivery === 'channel' || delivery === 'both';
 
-        if (deliveryMode === 'dm' || deliveryMode === 'both') {
-            await user.send(messagePayload).catch((err) => {
-                logger.warn(`Failed to DM user ${user.id}: ${err.message}`);
-                if (deliveryMode === 'both' && channel) {
-                    channel.send(messagePayload).catch(e => logger.warn(`Fallback channel send failed: ${e.message}`));
+        // Build and send message
+        if (intro.message?.type === 'embed' && intro.embed?.enabled) {
+            const color = (() => {
+                const c = intro.embed.color || '#0099FF';
+                const valid = /^#?[0-9A-Fa-f]{6}$/.test(String(c));
+                return valid ? (c.startsWith('#') ? c : `#${c}`) : '#0099FF';
+            })();
+            const embed = {
+                title: apply(intro.embed.title || 'Welcome'),
+                description: apply(safeResult.message || intro.embed.description || ''),
+                color: parseInt(String(color).replace('#',''),16) || 0x0099FF,
+                thumbnail: intro.embed.thumbnail ? { url: intro.embed.thumbnail } : undefined,
+                image: intro.embed.image ? { url: intro.embed.image } : undefined,
+                footer: { text: `User: ${user.tag}` },
+                timestamp: new Date().toISOString(),
+            };
+            if (!embed.thumbnail) delete embed.thumbnail;
+            if (!embed.image) delete embed.image;
+            if (toDM) await user.send({ embeds: [embed] }).catch(e => logger.warn(`DM failed: ${e.message}`));
+            if (toChannel) await channel.send({ embeds: [embed] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
+        } else {
+            const text = emojiInline + apply(safeResult.message || intro.message?.content || '');
+            if (toDM) await user.send(text).catch(e => logger.warn(`DM failed: ${e.message}`));
+            if (toChannel) await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
+        }
+
+        // Reaction mode
+        if (intro.message?.emojiMode === 'reaction' && safeResult.emoji && originalMessage) {
+            try { await originalMessage.react(safeResult.emoji); } catch (e) { logger.warn(`React failed: ${e.message}`); }
+        }
+
+        // Logging
+        try {
+            if (intro.logs?.enabled && intro.logs?.channelId) {
+                const logChannel = channel.guild.channels.cache.get(intro.logs.channelId);
+                if (logChannel) {
+                    const embed = {
+                        title: `Gateway Attempt - ${safeResult.status || 'unknown'}`,
+                        color: safeResult.status === 'success' ? 0x00FF00 : 0xFF6600,
+                        fields: [
+                            { name: 'User', value: `${user.tag} (${user.id})` },
+                            { name: 'Account Age', value: replacements['{accountAge}'], inline: true },
+                            { name: 'Join Age', value: replacements['{joinAge}'], inline: true },
+                            { name: 'Mode', value: intro.mode?.type || 'unknown', inline: true },
+                            { name: 'Result', value: String(safeResult.status || 'unknown'), inline: true },
+                        ],
+                        timestamp: new Date().toISOString(),
+                    };
+                    await logChannel.send({ embeds: [embed] }).catch(e => logger.warn(`Log send failed: ${e.message}`));
                 }
-            });
-        }
-
-        if (deliveryMode === 'channel' || deliveryMode === 'both') {
-            if (channel) {
-                await channel.send(messagePayload).catch(err => logger.warn(`Failed sending channel message: ${err.message}`));
             }
-        }
+        } catch (e) { logger.warn(`Logging error: ${e.message}`); }
 
-        if (reactionEmoji && originalMessage && stateKey !== 'dm_prompt') {
-            try {
-                await originalMessage.react(reactionEmoji);
-            } catch (err) {
-                logger.warn(`Failed to react with emoji ${reactionEmoji}: ${err.message}`);
-            }
-        }
-
-        logger.info(`Verification message sent for ${user.tag} in guild ${channel?.guildId} (${stateKey})`);
-    } catch (error) {
-        logger.error(`Error sending verification message: ${error.message}`);
-    }
-}
-
-// ------------------ Slash command handlers for new settings ------------------
-export async function handleTriggerSet(interaction, word) {
-    try {
-        const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    triggerWord: word ? String(word).trim() : null,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Trigger word set to: ${word ?? 'none'}`, ephemeral: true });
     } catch (err) {
-        logger.error(`Error setting trigger word: ${err.message}`);
-        await interaction.reply({ content: 'Error setting trigger word', ephemeral: true });
+        logger.error(`sendIntroductionMessage error: ${err.message}`);
     }
 }
 
-export async function handleRoleSet(interaction, type, role) {
-    try {
-        const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        const newRoles = { ...ensured.roles };
-        if (type === 'verify') newRoles.verifyRoleId = role?.id ?? null;
-        if (type === 'pending') newRoles.pendingRoleId = role?.id ?? null;
-        if (type === 'remove') newRoles.removeRoleId = role?.id ?? null;
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    roles: newRoles,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Role ${type} set to ${role ? `<@&${role.id}>` : 'none'}`, ephemeral: true });
-    } catch (err) {
-        logger.error(`Error setting role ${type}: ${err.message}`);
-        await interaction.reply({ content: `Error setting role ${type}`, ephemeral: true });
-    }
-}
-
-export async function handleChannelSet(interaction, channel) {
-    try {
-        const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    verifyChannelId: channel?.id ?? null,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Verify channel set to ${channel ? `<#${channel.id}>` : 'none'}`, ephemeral: true });
-    } catch (err) {
-        logger.error(`Error setting verify channel: ${err.message}`);
-        await interaction.reply({ content: 'Error setting verify channel', ephemeral: true });
-    }
-}
-
-export async function handleMessageKeySet(interaction, key, text) {
-    try {
-        const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        const newMessages = { ...ensured.messages };
-        if (['success', 'already', 'error', 'dm_prompt'].includes(key)) {
-            if (!newMessages[key]) {
-                newMessages[key] = {
-                    text: '',
-                    embed: { enabled: false, title: 'Verification', description: '', color: '#0099FF', image: null, thumbnail: null },
-                    delivery: 'channel',
-                    reaction: null,
-                };
-            }
-            newMessages[key].text = text;
-        }
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    messages: newMessages,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Message '${key}' text updated.`, ephemeral: true });
-    } catch (err) {
-        logger.error(`Error updating message ${key}: ${err.message}`);
-        await interaction.reply({ content: `Error updating message ${key}`, ephemeral: true });
-    }
-}
-
+// Admin command handlers
 export async function handleEnable(interaction, channelId) {
     try {
         const guildId = interaction.guildId;
-
         const config = await getGuildConfig(guildId);
-        if (!config) {
-            await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-            return;
-        }
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const ensuredConfig = ensureDefaultConfig(existingIntroduce);
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensuredConfig,
-                    enabled: true,
-                    verifyChannelId: channelId || ensuredConfig.verifyChannelId,
-                },
-            },
-        });
-
-        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Module Enabled', description: `Introduce module has been enabled${channelId ? ` for <#${channelId}>` : '.'}` })], ephemeral: true });
-
-        logger.info(`Introduce module enabled for guild ${guildId}`);
-    } catch (error) {
-        logger.error(`Error enabling introduce module: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while enabling the module.' })], ephemeral: true });
-    }
+        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
+        const existing = config.modules?.introduce || {};
+        const ensured = ensureDefaultConfig(existing);
+        ensured.enabled = true;
+        ensured.channelId = channelId || ensured.channelId;
+        await updateGuildConfig(guildId, { modules: { ...config.modules, introduce: ensured } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Gateway Enabled', description: `Gateway enabled${channelId ? ` for <#${channelId}>` : '.'}` })], ephemeral: true });
+        logger.info(`Gateway enabled for guild ${guildId}`);
+    } catch (e) { logger.error(`handleEnable error: ${e.message}`); await interaction.reply({ content: 'Error enabling gateway', ephemeral: true }); }
 }
 
 export async function handleDisable(interaction) {
     try {
         const guildId = interaction.guildId;
-
         const config = await getGuildConfig(guildId);
-        if (!config) {
-            await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-            return;
-        }
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const ensuredConfig = ensureDefaultConfig(existingIntroduce);
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensuredConfig,
-                    enabled: false,
-                },
-            },
-        });
-
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF6600, title: 'Module Disabled', description: 'Introduce module has been disabled.' })], ephemeral: true });
-
-        logger.info(`Introduce module disabled for guild ${guildId}`);
-    } catch (error) {
-        logger.error(`Error disabling introduce module: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while disabling the module.' })], ephemeral: true });
-    }
+        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
+        const existing = config.modules?.introduce || {};
+        const ensured = ensureDefaultConfig(existing);
+        ensured.enabled = false;
+        await updateGuildConfig(guildId, { modules: { ...config.modules, introduce: ensured } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0xFF6600, title: 'Gateway Disabled', description: 'Gateway disabled.' })], ephemeral: true });
+        logger.info(`Gateway disabled for guild ${guildId}`);
+    } catch (e) { logger.error(`handleDisable error: ${e.message}`); await interaction.reply({ content: 'Error disabling gateway', ephemeral: true }); }
 }
 
 export async function handleView(interaction) {
     try {
         const guildId = interaction.guildId;
-
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const introduce = ensureDefaultConfig(existingIntroduce);
-
-        const statusText = introduce.enabled ? '✅ Enabled' : '❌ Disabled';
-        const channelText = introduce.verifyChannelId ? `<#${introduce.verifyChannelId}>` : 'Not set';
-        const triggerWord = introduce.triggerWord || 'Not set';
-
-        const successText = introduce.messages?.success?.text || 'No text set';
-        const successDelivery = introduce.messages?.success?.delivery || 'channel';
-        const successEmoji = introduce.messages?.success?.reaction || 'None';
-        const successEmbedEnabled = introduce.messages?.success?.embed?.enabled ? 'Yes' : 'No';
-
-        const alreadyText = introduce.messages?.already?.text || 'No text set';
-        const alreadyDelivery = introduce.messages?.already?.delivery || 'channel';
-        const alreadyEmoji = introduce.messages?.already?.reaction || 'None';
-
-        const errorText = introduce.messages?.error?.text || 'No text set';
-        const errorDelivery = introduce.messages?.error?.delivery || 'channel';
-        const errorEmoji = introduce.messages?.error?.reaction || 'None';
-
-        const dmText = introduce.messages?.dm_prompt?.text || 'No text set';
-        const dmDelivery = introduce.messages?.dm_prompt?.delivery || 'dm';
-
-        const verifyRole = introduce.roles?.verifyRoleId ? `<@&${introduce.roles.verifyRoleId}>` : 'None';
-        const pendingRole = introduce.roles?.pendingRoleId ? `<@&${introduce.roles.pendingRoleId}>` : 'None';
-        const removeRole = introduce.roles?.removeRoleId ? `<@&${introduce.roles.removeRoleId}>` : 'None';
-
-        const description = `**Status:** ${statusText}\n**Verify Channel:** ${channelText}\n**Trigger Word:** ${triggerWord}\n\n**Success Message:**\n**Text:** ${successText.substring(0, 80)}${successText.length > 80 ? '...' : ''}\n**Delivery:** ${successDelivery}\n**Reaction:** ${successEmoji}\n**Embed:** ${successEmbedEnabled}\n\n**Already Verified:**\n**Text:** ${alreadyText.substring(0, 80)}${alreadyText.length > 80 ? '...' : ''}\n**Delivery:** ${alreadyDelivery}\n**Reaction:** ${alreadyEmoji}\n\n**Error Message:**\n**Text:** ${errorText.substring(0, 80)}${errorText.length > 80 ? '...' : ''}\n**Delivery:** ${errorDelivery}\n**Reaction:** ${errorEmoji}\n\n**DM Prompt:**\n**Text:** ${dmText.substring(0, 80)}${dmText.length > 80 ? '...' : ''}\n**Delivery:** ${dmDelivery}\n\n**Role Management:**\n**Verify Role:** ${verifyRole}\n**Pending Role:** ${pendingRole}\n**Remove Role:** ${removeRole}`;
-
-        await interaction.reply({ embeds: [createEmbed({ color: 0x0099FF, title: 'Introduce Module Configuration', description })], ephemeral: true });
-    } catch (error) {
-        logger.error(`Error viewing introduce module config: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while viewing the configuration.' })], ephemeral: true });
-    }
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
+        const intro = ensureDefaultConfig(cfg.modules?.introduce || {});
+        const desc = `**Status:** ${intro.enabled ? '✅ Enabled' : '❌ Disabled'}\n**Channel:** ${intro.channelId ? `<#${intro.channelId}>` : 'Not set'}\n**Mode:** ${intro.mode?.type}\n**Trigger:** ${intro.mode?.triggerWord || 'N/A'}\n**Delivery:** ${intro.message?.delivery}\n**Verified Role:** ${intro.roles?.verifiedRoleId ? `<@&${intro.roles.verifiedRoleId}>` : 'None'}\n**Stats:** Total Verified: ${intro.stats?.totalVerified || 0}, Total Blocked: ${intro.stats?.totalBlocked || 0}`;
+        await interaction.reply({ embeds: [createEmbed({ color: 0x0099FF, title: 'Gateway Configuration', description: desc })], ephemeral: true });
+    } catch (e) { logger.error(`handleView error: ${e.message}`); await interaction.reply({ content: 'Error viewing gateway config', ephemeral: true }); }
 }
 
 export async function handleMessageSet(interaction, text) {
     try {
         const guildId = interaction.guildId;
-
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const ensuredConfig = ensureDefaultConfig(existingIntroduce);
-
-        const newMessages = { ...ensuredConfig.messages };
-        if (newMessages.success) {
-            newMessages.success.text = text;
-        }
-
-        await updateGuildConfig(guildId, { modules: { ...config.modules, introduce: { ...ensuredConfig, messages: newMessages } } });
-
-        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Success Message Updated', description: `Text updated to:\n\`\`\`${text}\`\`\`` })], ephemeral: true });
-
-        logger.info(`Introduce module success message updated for guild ${guildId}`);
-    } catch (error) {
-        logger.error(`Error updating introduce message: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while updating the message.' })], ephemeral: true });
-    }
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const existing = cfg.modules?.introduce || {};
+        const intro = ensureDefaultConfig(existing);
+        intro.message = { ...intro.message, content: text };
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, introduce: intro } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Message Updated', description: `Message set.` })], ephemeral: true });
+    } catch (e) { logger.error(`handleMessageSet error: ${e.message}`); await interaction.reply({ content: 'Error updating message', ephemeral: true }); }
 }
 
 export async function handleEmojiSet(interaction, emojiString) {
     try {
         const guildId = interaction.guildId;
-
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const ensuredConfig = ensureDefaultConfig(existingIntroduce);
-
-        const newMessages = { ...ensuredConfig.messages };
-
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const existing = cfg.modules?.introduce || {};
+        const intro = ensureDefaultConfig(existing);
+        const emojiCfg = intro.message?.emoji || {};
         if (emojiString.includes(':')) {
             const pairs = emojiString.split(/\s+/);
-            for (const pair of pairs) {
-                const [key, emoji] = pair.split(':');
-                if (['success', 'already', 'error'].includes(key.toLowerCase())) {
-                    if (newMessages[key.toLowerCase()]) {
-                        newMessages[key.toLowerCase()].reaction = emoji;
-                    }
-                }
+            for (const p of pairs) {
+                const [k,v] = p.split(':'); if (k && v && ['success','already','error'].includes(k)) emojiCfg[k] = v;
             }
-        } else {
-            if (newMessages.success) {
-                newMessages.success.reaction = emojiString;
-            }
-        }
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensuredConfig,
-                    messages: newMessages,
-                },
-            },
-        });
-
-        const descText = `**success:** ${newMessages.success?.reaction || 'None'}\n**already:** ${newMessages.already?.reaction || 'None'}\n**error:** ${newMessages.error?.reaction || 'None'}`;
-        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Reactions Updated', description: `Reactions set to:\n${descText}` })], ephemeral: true });
-        logger.info(`Introduce module reactions updated for guild ${guildId}`);
-    } catch (error) {
-        logger.error(`Error updating reactions: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while updating reactions.' })], ephemeral: true });
-    }
+        } else { emojiCfg.success = emojiString; }
+        intro.message.emoji = emojiCfg;
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, introduce: intro } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Emojis Updated', description: 'Emojis updated.' })], ephemeral: true });
+    } catch (e) { logger.error(`handleEmojiSet error: ${e.message}`); await interaction.reply({ content: 'Error updating emojis', ephemeral: true }); }
 }
 
 export async function handleEmbedToggle(interaction, enabled) {
     try {
         const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'Failed to load guild configuration' })], ephemeral: true });
-
-        const existingIntroduce = config.modules?.introduce || {};
-        const ensuredConfig = ensureDefaultConfig(existingIntroduce);
-
-        const newMessages = { ...ensuredConfig.messages };
-        if (newMessages.success && newMessages.success.embed) {
-            newMessages.success.embed.enabled = enabled;
-        }
-
-        await updateGuildConfig(guildId, { modules: { ...config.modules, introduce: { ...ensuredConfig, messages: newMessages } } });
-
-        const statusText = enabled ? '✅ Enabled' : '❌ Disabled';
-        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Success Message Embed Updated', description: `Embed display is now ${statusText}` })], ephemeral: true });
-        logger.info(`Introduce module embed status updated for guild ${guildId}`);
-    } catch (error) {
-        logger.error(`Error updating introduce embed status: ${error.message}`);
-        await interaction.reply({ embeds: [createEmbed({ color: 0xFF0000, title: 'Error', description: 'An error occurred while updating the embed status.' })], ephemeral: true });
-    }
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const existing = cfg.modules?.introduce || {};
+        const intro = ensureDefaultConfig(existing);
+        intro.embed = { ...intro.embed, enabled };
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, introduce: intro } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'Embed Toggled', description: `Embed ${enabled ? 'enabled' : 'disabled'}` })], ephemeral: true });
+    } catch (e) { logger.error(`handleEmbedToggle error: ${e.message}`); await interaction.reply({ content: 'Error toggling embed', ephemeral: true }); }
 }
 
-/**
- * Set delivery mode for a specific message state
- * @param {Interaction} interaction - Discord interaction
- * @param {string} state - Message state: 'success', 'already', 'error', or 'dm_prompt'
- * @param {string} delivery - Delivery mode: 'channel', 'dm', or 'both'
- */
-export async function handleDeliverySet(interaction, state, delivery) {
+export async function handleStats(interaction) {
     try {
         const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        if (!['success', 'already', 'error', 'dm_prompt'].includes(state)) {
-            return interaction.reply({ content: 'Invalid state. Use: success, already, error, dm_prompt', ephemeral: true });
-        }
-
-        if (!['channel', 'dm', 'both'].includes(delivery)) {
-            return interaction.reply({ content: 'Invalid delivery mode. Use: channel, dm, both', ephemeral: true });
-        }
-
-        const newMessages = { ...ensured.messages };
-        if (newMessages[state]) {
-            newMessages[state].delivery = delivery;
-        }
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    messages: newMessages,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Delivery mode for '${state}' set to: ${delivery}`, ephemeral: true });
-    } catch (err) {
-        logger.error(`Error setting delivery mode: ${err.message}`);
-        await interaction.reply({ content: 'Error setting delivery mode', ephemeral: true });
-    }
-}
-
-/**
- * Configure embed settings for a specific message state
- * @param {Interaction} interaction - Discord interaction
- * @param {string} state - Message state
- * @param {string} setting - Embed setting: 'enable', 'disable', 'title', 'description', 'color', 'image', 'thumbnail'
- * @param {string} value - New value for the setting
- */
-export async function handleStateEmbedSet(interaction, state, setting, value) {
-    try {
-        const guildId = interaction.guildId;
-        const config = await getGuildConfig(guildId);
-        if (!config) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
-
-        const existing = config.modules?.introduce || {};
-        const ensured = ensureDefaultConfig(existing);
-
-        if (!['success', 'already', 'error', 'dm_prompt'].includes(state)) {
-            return interaction.reply({ content: 'Invalid state', ephemeral: true });
-        }
-
-        const newMessages = { ...ensured.messages };
-        if (!newMessages[state]) {
-            return interaction.reply({ content: `No config found for state: ${state}`, ephemeral: true });
-        }
-
-        const embedConfig = newMessages[state].embed;
-
-        if (setting === 'enable') {
-            embedConfig.enabled = true;
-        } else if (setting === 'disable') {
-            embedConfig.enabled = false;
-        } else if (setting === 'title') {
-            embedConfig.title = value || 'Verification';
-        } else if (setting === 'description') {
-            embedConfig.description = value || '';
-        } else if (setting === 'color') {
-            embedConfig.color = value || '#0099FF';
-        } else if (setting === 'image') {
-            embedConfig.image = value || null;
-        } else if (setting === 'thumbnail') {
-            embedConfig.thumbnail = value || null;
-        } else {
-            return interaction.reply({ content: 'Invalid embed setting', ephemeral: true });
-        }
-
-        await updateGuildConfig(guildId, {
-            modules: {
-                ...config.modules,
-                introduce: {
-                    ...ensured,
-                    messages: newMessages,
-                },
-            },
-        });
-
-        await interaction.reply({ content: `Embed setting '${setting}' for state '${state}' updated.`, ephemeral: true });
-    } catch (err) {
-        logger.error(`Error setting embed config: ${err.message}`);
-        await interaction.reply({ content: 'Error setting embed config', ephemeral: true });
-    }
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load config', ephemeral: true });
+        const intro = ensureDefaultConfig(cfg.modules?.introduce || {});
+        const s = intro.stats || {};
+        const desc = `**Total Verified:** ${s.totalVerified || 0}\n**Total Blocked:** ${s.totalBlocked || 0}\n**Today Verified:** ${s.todayVerified || 0}\n**Today Blocked:** ${s.todayBlocked || 0}\n**Gateway Locked:** ${s.gatewayLocked ? 'Yes' : 'No'}`;
+        await interaction.reply({ embeds: [createEmbed({ color: 0x0099FF, title: 'Gateway Stats', description: desc })], ephemeral: true });
+    } catch (e) { logger.error(`handleStats error: ${e.message}`); await interaction.reply({ content: 'Error fetching stats', ephemeral: true }); }
 }
