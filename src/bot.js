@@ -9,6 +9,7 @@ import { logger } from './core/logger.js';
 export const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers, // REQUIRED for guildMemberAdd
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
     ],
