@@ -28,6 +28,13 @@ export async function startBot() {
     await loadEvents(client);
     await loadCommands(client);
     await loadModules(client);
+    // Init anti-nuke watcher for runtime protection
+    try {
+        const anti = await import('./security/antiNukeWatcher.js');
+        if (anti && anti.init) anti.init(client);
+    } catch (err) {
+        logger.warn(`Failed to initialize antiNukeWatcher: ${err.message}`);
+    }
     
     await client.login(env.TOKEN);
 }

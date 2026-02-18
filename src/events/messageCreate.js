@@ -1,5 +1,5 @@
 import { Events } from 'discord.js';
-import { getGuildConfig } from '../core/database.js';
+import { getGuildConfig, updateGuildConfig } from '../core/database.js';
 import { logger } from '../core/logger.js';
 import gatewayModule from '../modules/gateway/index.js';
 import { ensureDefaultConfig } from '../modules/gateway/config.schema.js';
@@ -23,6 +23,48 @@ export default {
             // Ensure full default config
             const gateway = ensureDefaultConfig(guildConfig.modules?.gateway || {});
             if (!gateway || !gateway.enabled) return;
+
+            // --- Mention abuse protection ---
+            try {
+                const sev = gateway.security || {};
+                const mentionThreshold = (sev.mentionThreshold && Number.isInteger(sev.mentionThreshold)) ? sev.mentionThreshold : 6;
+
+                // @everyone spam
+                if (message.mentions.everyone) {
+                    await message.delete().catch(() => null);
+                    logger.security(`@everyone abuse by ${message.author.id} in ${message.guildId}`);
+                    // decrement trust score
+                    try {
+                        const cfg = await getGuildConfig(message.guildId);
+                        const modules = cfg.modules || {};
+                        const trust = modules.trust || { scores: {} };
+                        trust.scores = trust.scores || {};
+                        trust.scores[message.author.id] = (trust.scores[message.author.id] || 0) - 1;
+                        modules.trust = trust;
+                        await updateGuildConfig(message.guildId, { modules });
+                    } catch (e) { logger.warn(`Failed updating trust after mention abuse: ${e.message}`); }
+                    return;
+                }
+
+                // Mass mentions
+                const totalMentions = (message.mentions.users?.size || 0) + (message.mentions.roles?.size || 0);
+                if (totalMentions >= mentionThreshold) {
+                    await message.delete().catch(() => null);
+                    logger.security(`Mass mention abuse (${totalMentions}) by ${message.author.id} in ${message.guildId}`);
+                    try {
+                        const cfg = await getGuildConfig(message.guildId);
+                        const modules = cfg.modules || {};
+                        const trust = modules.trust || { scores: {} };
+                        trust.scores = trust.scores || {};
+                        trust.scores[message.author.id] = (trust.scores[message.author.id] || 0) - 1;
+                        modules.trust = trust;
+                        await updateGuildConfig(message.guildId, { modules });
+                    } catch (e) { logger.warn(`Failed updating trust after mass mention: ${e.message}`); }
+                    return;
+                }
+            } catch (err) {
+                logger.warn(`Mention protection failed: ${err.message}`);
+            }
 
             // Enforce verify channel (if set)
             if (gateway.verifyChannelId && gateway.verifyChannelId !== message.channelId) return;
