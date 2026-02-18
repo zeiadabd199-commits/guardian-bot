@@ -54,6 +54,9 @@ export async function clearGatewayLock(guildId) {
         const cfg = await getGuildConfig(guildId);
         if (!cfg) return;
         const gateway = ensureDefaultConfig(cfg.modules?.gateway || {});
+        // default template names (non-hardcoded embed content — templates only)
+        gateway.successTemplate = gateway.successTemplate || 'verify_success';
+        gateway.failTemplate = gateway.failTemplate || 'verify_fail';
         gateway.stats.gatewayLocked = false;
         gateway.stats.lockUntil = null;
         gateway.stats.lockReason = null;
@@ -238,6 +241,17 @@ export async function processVerification(params) {
 
         try { eventBus.emit('gateway.verified', { guildId: guild.id, userId: user.id }); } catch (err) { logger.warn(`Failed to emit gateway.verified event: ${err.message}`); }
 
+        // send welcome DM via template (DM only, no channel welcome)
+        try {
+            const tplName = (system && system.successTemplate) ? system.successTemplate : (gateway.successTemplate || 'verify_success');
+            const rendered = await embedTemplates.renderTemplate(guild.id, tplName, { user, guild, channel: null, date: new Date() });
+            if (rendered) {
+                await user.send({ embeds: [rendered] }).catch(e => logger.warn(`Welcome DM failed: ${e.message}`));
+            }
+        } catch (e) {
+            logger.error(`Welcome DM error: ${e.message}`);
+        }
+
         // success message from system or fallback
         return { status: 'success', message: system.successMessage || 'Verified' };
     } catch (err) {
@@ -284,8 +298,8 @@ export async function sendVerificationMessage(channel, user, result, config, ori
         const useDMEmbed = gateway.message?.type === 'embed' && gateway.embedDM?.enabled;
 
         // Determine if an embed template is configured for success or reject
-        const successTemplate = sys?.messageTemplate || gateway.messageTemplate || null;
-        const rejectTemplate = sys?.rejectTemplate || gateway.rejectTemplate || null;
+        const successTemplate = sys?.successTemplate || gateway.successTemplate || null;
+        const rejectTemplate = sys?.failTemplate || gateway.failTemplate || null;
 
         // Send to channel
         if (toChannel) {
@@ -299,16 +313,13 @@ export async function sendVerificationMessage(channel, user, result, config, ori
             if (templateName) {
                 try {
                     const rendered = await embedTemplates.renderTemplate(channel.guild.id, templateName, {
-                        '{user}': user.username,
-                        '{mention}': `<@${user.id}>`,
-                        '{guild}': channel.guild?.name || '',
-                        '{channel}': channel.name || channel.id || '',
-                        '{date}': new Date().toLocaleString(),
+                        user,
+                        guild: channel.guild,
+                        channel,
+                        date: new Date(),
                     });
                     if (rendered) {
                         await channel.send({ embeds: [rendered] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
-                        // skip non-template path
-                        // continue to logging
                     } else {
                         const text = applyTemplates(channelText, templates);
                         await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
@@ -340,11 +351,10 @@ export async function sendVerificationMessage(channel, user, result, config, ori
             if (safeResult.status === 'success' && successTemplate) {
                 try {
                     const rendered = await embedTemplates.renderTemplate(channel.guild.id, successTemplate, {
-                        '{user}': user.username,
-                        '{mention}': `<@${user.id}>`,
-                        '{guild}': channel.guild?.name || '',
-                        '{channel}': channel.name || channel.id || '',
-                        '{date}': new Date().toLocaleString(),
+                        user,
+                        guild: channel.guild,
+                        channel,
+                        date: new Date(),
                     });
                     if (rendered) {
                         await user.send({ embeds: [rendered] }).catch(e => logger.warn(`DM failed: ${e.message}`));
