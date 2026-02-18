@@ -4,6 +4,7 @@ import { getGuildConfig, updateGuildConfig } from '../../core/database.js';
 import { logger } from '../../core/logger.js';
 import { ensureDefaultConfig } from './config.schema.js';
 import { calculateGatewayTrustScore } from './trustScore.js';
+import * as embedTemplates from '../embedTemplates/service.js';
 
 // Memory caches for rate-limiting and raid detection
 const rateLimitMap = new Map();
@@ -282,6 +283,10 @@ export async function sendVerificationMessage(channel, user, result, config, ori
         const usePublicEmbed = gateway.message?.type === 'embed' && gateway.embedPublic?.enabled;
         const useDMEmbed = gateway.message?.type === 'embed' && gateway.embedDM?.enabled;
 
+        // Determine if an embed template is configured for success or reject
+        const successTemplate = sys?.messageTemplate || gateway.messageTemplate || null;
+        const rejectTemplate = sys?.rejectTemplate || gateway.rejectTemplate || null;
+
         // Send to channel
         if (toChannel) {
             // choose message based on status and system overrides
@@ -289,15 +294,40 @@ export async function sendVerificationMessage(channel, user, result, config, ori
             if (safeResult.status === 'success') channelText = sys?.successMessage || channelText || gateway.message?.content || 'Verified';
             if (safeResult.status === 'already') channelText = sys?.alreadyVerifiedMessage || channelText || 'Already verified';
             if (safeResult.status && safeResult.status.startsWith('blocked')) channelText = sys?.failMessage || channelText || 'Verification failed';
-
-            if (usePublicEmbed) {
-                const builder = new GatewayEmbedBuilder(gateway.embedPublic);
-                builder.config.description = applyTemplates(channelText, templates);
-                const embed = builder.build(templates);
-                await channel.send({ embeds: [embed] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
+            // If a template name is configured, prefer rendering that template
+            const templateName = (safeResult.status === 'success') ? successTemplate : (safeResult.status && safeResult.status.startsWith('blocked') ? rejectTemplate : null);
+            if (templateName) {
+                try {
+                    const rendered = await embedTemplates.renderTemplate(channel.guild.id, templateName, {
+                        '{user}': user.username,
+                        '{mention}': `<@${user.id}>`,
+                        '{guild}': channel.guild?.name || '',
+                        '{channel}': channel.name || channel.id || '',
+                        '{date}': new Date().toLocaleString(),
+                    });
+                    if (rendered) {
+                        await channel.send({ embeds: [rendered] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
+                        // skip non-template path
+                        // continue to logging
+                    } else {
+                        const text = applyTemplates(channelText, templates);
+                        await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
+                    }
+                } catch (e) {
+                    logger.error(`Template render/send failed: ${e.message}`);
+                    const text = applyTemplates(channelText, templates);
+                    await channel.send(text).catch(err => logger.error(`Channel send failed: ${err.message}`));
+                }
             } else {
-                const text = applyTemplates(channelText, templates);
-                await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
+                if (usePublicEmbed) {
+                    const builder = new GatewayEmbedBuilder(gateway.embedPublic);
+                    builder.config.description = applyTemplates(channelText, templates);
+                    const embed = builder.build(templates);
+                    await channel.send({ embeds: [embed] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
+                } else {
+                    const text = applyTemplates(channelText, templates);
+                    await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
+                }
             }
         }
 
@@ -306,15 +336,37 @@ export async function sendVerificationMessage(channel, user, result, config, ori
             // For success, prefer system.dmSuccessMessage if provided
             let dmText = safeResult.message || '';
             if (safeResult.status === 'success') dmText = sys?.dmSuccessMessage || dmText || gateway.message?.content || 'Verified';
-
-            if (useDMEmbed) {
-                const builder = new GatewayEmbedBuilder(gateway.embedDM);
-                builder.config.description = applyTemplates(dmText, templates);
-                const embed = builder.build(templates);
-                await user.send({ embeds: [embed] }).catch(e => logger.warn(`DM failed: ${e.message}`));
+            // If success and template available, render and DM
+            if (safeResult.status === 'success' && successTemplate) {
+                try {
+                    const rendered = await embedTemplates.renderTemplate(channel.guild.id, successTemplate, {
+                        '{user}': user.username,
+                        '{mention}': `<@${user.id}>`,
+                        '{guild}': channel.guild?.name || '',
+                        '{channel}': channel.name || channel.id || '',
+                        '{date}': new Date().toLocaleString(),
+                    });
+                    if (rendered) {
+                        await user.send({ embeds: [rendered] }).catch(e => logger.warn(`DM failed: ${e.message}`));
+                    } else {
+                        const text = applyTemplates(dmText, templates);
+                        await user.send(text).catch(e => logger.warn(`DM failed: ${e.message}`));
+                    }
+                } catch (e) {
+                    logger.error(`Template DM failed: ${e.message}`);
+                    const text = applyTemplates(dmText, templates);
+                    await user.send(text).catch(err => logger.warn(`DM failed: ${err.message}`));
+                }
             } else {
-                const text = applyTemplates(dmText, templates);
-                await user.send(text).catch(e => logger.warn(`DM failed: ${e.message}`));
+                if (useDMEmbed) {
+                    const builder = new GatewayEmbedBuilder(gateway.embedDM);
+                    builder.config.description = applyTemplates(dmText, templates);
+                    const embed = builder.build(templates);
+                    await user.send({ embeds: [embed] }).catch(e => logger.warn(`DM failed: ${e.message}`));
+                } else {
+                    const text = applyTemplates(dmText, templates);
+                    await user.send(text).catch(e => logger.warn(`DM failed: ${e.message}`));
+                }
             }
         }
 

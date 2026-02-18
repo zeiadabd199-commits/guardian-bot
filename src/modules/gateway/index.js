@@ -81,35 +81,6 @@ export default {
                     channel: message.channel,
                     config: gateway,
                     mode: 'reaction',
-                    messageObject: message,
-                });
-                await sendVerificationMessage(message.channel, user, result, gateway, message);
-            } catch (err) {
-                logger.error(`Reaction handler error: ${err.message}`);
-            }
-        });
-
-        // ====================================================================
-        // TRIGGER WORD VERIFICATION HANDLER
-        // ====================================================================
-        client.on('messageCreate', async (message) => {
-            try {
-                if (message.author.bot || !message.guild) return;
-
-                const guildConfig = await getGuildConfig(message.guild.id);
-                const gateway = ensureDefaultConfig(guildConfig.modules?.gateway || {});
-
-                if (!gateway.enabled || gateway.mode?.type !== 'trigger') return;
-
-                const triggerWord = gateway.mode?.triggerWord;
-                if (!triggerWord) return;
-
-                if (gateway.channelId && gateway.channelId !== message.channelId) return;
-
-                const hasTriggered = message.content.toLowerCase().includes(triggerWord.toLowerCase());
-                if (!hasTriggered) return;
-
-                const result = await processVerification({
                     import {
                         processVerification,
                         sendVerificationMessage,
@@ -348,3 +319,4 @@ export default {
                         sendWelcomeMessage,
                         assignAutoRoles,
                     };
+

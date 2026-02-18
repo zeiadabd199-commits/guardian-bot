@@ -2,39 +2,36 @@ import fs from 'fs';
 import path from 'path';
 import { REST, Routes } from 'discord.js';
 import { pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
 import { env } from '../config/environment.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 export async function loadCommands(client) {
-  const commands = [];
-    const commandsPath = path.join(process.cwd(), 'src', 'commands');
-    const files = fs.readdirSync(commandsPath);
+    const commands = [];
+    const commandsPath = path.join(__dirname, '..', 'commands');
+    if (!fs.existsSync(commandsPath)) return;
 
-    for (const file of files) {
-        const filePath = path.join(commandsPath, file);
-        const stat = fs.statSync(filePath);
+    const entries = fs.readdirSync(commandsPath);
 
-        let commandFile = null;
+    for (const entry of entries) {
+        const entryPath = path.join(commandsPath, entry);
+        const stat = fs.statSync(entryPath);
 
-        if (stat.isDirectory()) {
-            // Load from folder/index.js
-            commandFile = path.join(filePath, 'index.js');
-        } else if (file.endsWith('.js')) {
-            // Load directly from .js file
-            commandFile = filePath;
-        }
+        // Only load directory/index.js files to avoid accidental command files
+        if (!stat.isDirectory()) continue;
 
-        if (!commandFile || !fs.existsSync(commandFile)) continue;
+        const commandFile = path.join(entryPath, 'index.js');
+        if (!fs.existsSync(commandFile)) continue;
 
         try {
             const commandModule = await import(pathToFileURL(commandFile).href);
             const command = commandModule.default;
-
             if (!command?.data || !command?.execute) continue;
-
             client.commands.set(command.data.name, command);
             commands.push(command.data.toJSON());
         } catch (error) {
-            console.error(`[Guardian] Error loading command from ${file}:`, error);
+            console.error(`[Guardian] Error loading command from ${entry}:`, error);
         }
     }
 
