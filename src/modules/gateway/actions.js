@@ -97,12 +97,12 @@ export async function incrementStats(guildId, field) {
  * Main verification processor with full security engine
  */
 export async function processVerification(params) {
-    const { guild, user, channel, config, mode } = params;
+    const { guild, user, channel, config, system: suppliedSystem, mode } = params;
     const messageObject = params.messageObject || null;
 
     try {
         const cfg = await getGuildConfig(guild.id);
-        if (!cfg) return { status: 'error', message: 'Failed to load configuration', emoji: config?.message?.emoji?.error };
+        if (!cfg) return { status: 'error', message: 'Failed to load configuration' };
         const gateway = ensureDefaultConfig(cfg.modules?.gateway || {});
 
         // Gateway lock check
@@ -110,44 +110,53 @@ export async function processVerification(params) {
             const until = gateway.stats.lockUntil;
             if (until && Date.now() < until) {
                 await incrementStats(guild.id, 'blocked');
-                return { status: 'gateway_locked', message: 'Gateway temporarily locked due to raid', emoji: gateway.message?.emoji?.error };
+                return { status: 'gateway_locked', message: 'Gateway temporarily locked due to raid' };
             }
         }
 
-        // Already verified check
+        // Determine active system
+        let system = suppliedSystem || null;
+        if (!system) {
+            const wantType = mode; // mode passed from event: button,reaction,trigger,slash
+            system = gateway.systems.find(s => s.enabled && ((s.type === wantType) || (s.type === 'text' && wantType === 'trigger')));
+        }
+        if (!system) return { status: 'error', message: 'No matching verification system' };
+
+        // Already verified check (module-level)
         if (gateway.introducedUsers && gateway.introducedUsers.includes(user.id)) {
-            return { status: 'already', message: `${user.username} already verified`, emoji: gateway.message?.emoji?.already };
+            return { status: 'already', message: system.alreadyVerifiedMessage || 'Already verified' };
         }
 
         // Member fetch
         const member = await guild.members.fetch(user.id).catch(() => null);
 
-        // Bypass roles check
+        // Bypass roles check (module-level bypassRoles supported)
         if (member && Array.isArray(gateway.roles?.bypassRoles) && gateway.roles.bypassRoles.some(r => member.roles.cache.has(r))) {
-            if (gateway.roles?.verifiedRoleId) {
-                const vr = await guild.roles.fetch(gateway.roles.verifiedRoleId).catch(() => null);
-                if (vr && !member.roles.cache.has(vr.id)) {
-                    await member.roles.add(vr).catch(e => logger.error(`Failed adding bypass verified role: ${e.message}`));
-                }
+            // add configured verify role if present
+            const addRoleId = system.verifyRoleAdd || gateway.roles?.verifiedRoleId;
+            if (addRoleId) {
+                const vr = await guild.roles.fetch(addRoleId).catch(() => null);
+                if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(`Failed adding bypass verified role: ${e.message}`));
             }
             const updated = [...(gateway.introducedUsers || []), user.id];
             await updateGuildConfig(guild.id, { modules: { ...cfg.modules, gateway: { ...gateway, introducedUsers: updated } } });
             await incrementStats(guild.id, 'verified');
-            return { status: 'success', message: 'Bypassed verification', emoji: gateway.message?.emoji?.success };
+            return { status: 'success', message: system.successMessage || 'Bypassed verification' };
         }
 
-        // Account age check
+        // Account age check (module-level security)
+        const sec = gateway.security || {};
         const accountAgeDays = Math.floor((Date.now() - new Date(user.createdAt).getTime()) / (1000 * 60 * 60 * 24));
-        if (accountAgeDays < (gateway.security?.minAccountAgeDays || 0)) {
+        if (accountAgeDays < (sec.minAccountAgeDays || 0)) {
             await incrementStats(guild.id, 'blocked');
-            return { status: 'blocked_account_age', message: 'Account too new', emoji: gateway.message?.emoji?.error };
+            return { status: 'blocked_account_age', message: system.failMessage || 'Account too new' };
         }
 
         // Join age check
         const joinAgeMinutes = member && member.joinedAt ? Math.floor((Date.now() - new Date(member.joinedAt).getTime()) / (1000 * 60)) : Infinity;
-        if (joinAgeMinutes < (gateway.security?.minJoinMinutes || 0)) {
+        if (joinAgeMinutes < (sec.minJoinMinutes || 0)) {
             await incrementStats(guild.id, 'blocked');
-            return { status: 'blocked_join_age', message: 'Joined too recently', emoji: gateway.message?.emoji?.error };
+            return { status: 'blocked_join_age', message: system.failMessage || 'Joined too recently' };
         }
 
         // Per-user rate limit
@@ -156,13 +165,13 @@ export async function processVerification(params) {
         pruneOld(userArr, 60 * 1000);
         userArr.push(now());
         rateLimitMap.set(rlKey, userArr);
-        if (userArr.length > (gateway.security?.rateLimitPerMinute || 3)) {
+        if (userArr.length > (sec.rateLimitPerMinute || 3)) {
             const gArr = guildAttempts.get(guild.id) || [];
             pruneOld(gArr, 60 * 1000);
             gArr.push(now());
             guildAttempts.set(guild.id, gArr);
             await incrementStats(guild.id, 'blocked');
-            return { status: 'blocked_spam', message: 'Rate limited', emoji: gateway.message?.emoji?.error };
+            return { status: 'blocked_spam', message: system.failMessage || 'Rate limited' };
         }
 
         // Raid detection
@@ -170,30 +179,31 @@ export async function processVerification(params) {
         pruneOld(gArr, 60 * 1000);
         gArr.push(now());
         guildAttempts.set(guild.id, gArr);
-        if (gateway.security?.autoLockOnRaid && gArr.length > (gateway.security?.raidThresholdPerMinute || 15)) {
-            await setGatewayLock(guild.id, gateway.security.lockDurationMinutes || 10, 'Raid detected - auto-lock');
-            return { status: 'gateway_locked', message: 'Gateway locked due to raid', emoji: gateway.message?.emoji?.error };
+        if (sec.autoLockOnRaid && gArr.length > (sec.raidThresholdPerMinute || 15)) {
+            await setGatewayLock(guild.id, sec.lockDurationMinutes || 10, 'Raid detected - auto-lock');
+            return { status: 'gateway_locked', message: 'Gateway locked due to raid' };
         }
 
-        // New account role
+        // New account and suspicious roles (legacy behavior preserved)
         if (member && gateway.roles?.newAccountRoleId && accountAgeDays < 7) {
             const nr = await guild.roles.fetch(gateway.roles.newAccountRoleId).catch(() => null);
             if (nr && !member.roles.cache.has(nr.id)) await member.roles.add(nr).catch(e => logger.error(e.message));
         }
-
-        // Suspicious heuristic
-        if (member && gateway.roles?.suspiciousRoleId && accountAgeDays < ((gateway.security?.minAccountAgeDays || 0) * 2)) {
+        if (member && gateway.roles?.suspiciousRoleId && accountAgeDays < ((sec.minAccountAgeDays || 0) * 2)) {
             const sr = await guild.roles.fetch(gateway.roles.suspiciousRoleId).catch(() => null);
             if (sr && !member.roles.cache.has(sr.id)) await member.roles.add(sr).catch(e => logger.error(e.message));
         }
 
-        // Assign verified role
-        if (member && gateway.roles?.verifiedRoleId) {
-            const vr = await guild.roles.fetch(gateway.roles.verifiedRoleId).catch(() => null);
-            if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(e.message));
+        // Assign verify role defined on the system or fallback to legacy
+        if (member) {
+            const addRoleId = system.verifyRoleAdd || gateway.roles?.verifiedRoleId;
+            if (addRoleId) {
+                const vr = await guild.roles.fetch(addRoleId).catch(() => null);
+                if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(e.message));
+            }
         }
 
-        // Remove pending roles on success
+        // Remove pending roles on success (legacy behavior preserved)
         if (member) {
             if (gateway.roles?.suspiciousRoleId) {
                 const sr = await guild.roles.fetch(gateway.roles.suspiciousRoleId).catch(() => null);
@@ -225,15 +235,13 @@ export async function processVerification(params) {
 
         logger.info(`Gateway score for ${user.id}: ${trustScoreResult.score} (${trustScoreResult.risk})`);
 
-        try {
-            eventBus.emit('gateway.verified', { guildId: guild.id, userId: user.id });
-        } catch (err) {
-            logger.warn(`Failed to emit gateway.verified event: ${err.message}`);
-        }
-        return { status: 'success', message: gateway.message?.content || 'Verified', emoji: gateway.message?.emoji?.success };
+        try { eventBus.emit('gateway.verified', { guildId: guild.id, userId: user.id }); } catch (err) { logger.warn(`Failed to emit gateway.verified event: ${err.message}`); }
+
+        // success message from system or fallback
+        return { status: 'success', message: system.successMessage || 'Verified' };
     } catch (err) {
         logger.error(`processVerification error: ${err.message}`);
-        return { status: 'error', message: 'Internal error', emoji: config?.message?.emoji?.error };
+        return { status: 'error', message: 'Internal error' };
     }
 }
 
@@ -244,10 +252,11 @@ export async function processVerification(params) {
 /**
  * Send verification message with embeds, templates, and delivery modes
  */
-export async function sendVerificationMessage(channel, user, result, config, originalMessage = null) {
+export async function sendVerificationMessage(channel, user, result, config, originalMessage = null, system = null) {
     try {
         const gateway = ensureDefaultConfig(config || {});
-        const safeResult = result || { status: 'error', message: 'No result', emoji: gateway.message?.emoji?.error };
+        const sys = system || null;
+        const safeResult = result || { status: 'error', message: 'No result' };
 
         // Template replacements
         const member = await channel.guild?.members.fetch(user.id).catch(() => null);
@@ -257,45 +266,54 @@ export async function sendVerificationMessage(channel, user, result, config, ori
         const templates = {
             '{user}': user.username,
             '{mention}': `<@${user.id}>`,
+            '{guild}': channel.guild?.name || '',
             '{server}': channel.guild?.name || '',
             '{accountAge}': `${accountAgeDays}d`,
             '{joinAge}': joinAgeMinutes ? `${joinAgeMinutes}m` : 'N/A',
             '{guildMemberCount}': String(channel.guild?.memberCount || 0),
-            '{verifiedRole}': gateway.roles?.verifiedRoleId ? `<@&${gateway.roles.verifiedRoleId}>` : 'None',
+            '{verifiedRole}': (sys?.verifyRoleAdd) ? `<@&${sys.verifyRoleAdd}>` : (gateway.roles?.verifiedRoleId ? `<@&${gateway.roles.verifiedRoleId}>` : 'None'),
         };
 
+        // Delivery decisions: allow system override via system.dmSuccessMessage or fallback to gateway.message.delivery
         const delivery = gateway.message?.delivery || 'channel';
-        const toDM = delivery === 'dm' || delivery === 'both';
         const toChannel = delivery === 'channel' || delivery === 'both';
+        const toDM = delivery === 'dm' || delivery === 'both';
 
-        // Build messages
         const usePublicEmbed = gateway.message?.type === 'embed' && gateway.embedPublic?.enabled;
         const useDMEmbed = gateway.message?.type === 'embed' && gateway.embedDM?.enabled;
 
         // Send to channel
         if (toChannel) {
+            // choose message based on status and system overrides
+            let channelText = safeResult.message || '';
+            if (safeResult.status === 'success') channelText = sys?.successMessage || channelText || gateway.message?.content || 'Verified';
+            if (safeResult.status === 'already') channelText = sys?.alreadyVerifiedMessage || channelText || 'Already verified';
+            if (safeResult.status && safeResult.status.startsWith('blocked')) channelText = sys?.failMessage || channelText || 'Verification failed';
+
             if (usePublicEmbed) {
                 const builder = new GatewayEmbedBuilder(gateway.embedPublic);
-                builder.config.description = safeResult.message || gateway.embedPublic.description;
+                builder.config.description = applyTemplates(channelText, templates);
                 const embed = builder.build(templates);
                 await channel.send({ embeds: [embed] }).catch(e => logger.error(`Channel send failed: ${e.message}`));
             } else {
-                const emojiInline = (safeResult.emoji && gateway.message?.emojiMode !== 'reaction') ? `${safeResult.emoji} ` : '';
-                const text = emojiInline + (safeResult.message || gateway.message?.content || '');
+                const text = applyTemplates(channelText, templates);
                 await channel.send(text).catch(e => logger.error(`Channel send failed: ${e.message}`));
             }
         }
 
         // Send to DM
         if (toDM) {
+            // For success, prefer system.dmSuccessMessage if provided
+            let dmText = safeResult.message || '';
+            if (safeResult.status === 'success') dmText = sys?.dmSuccessMessage || dmText || gateway.message?.content || 'Verified';
+
             if (useDMEmbed) {
                 const builder = new GatewayEmbedBuilder(gateway.embedDM);
-                builder.config.description = safeResult.message || gateway.embedDM.description;
+                builder.config.description = applyTemplates(dmText, templates);
                 const embed = builder.build(templates);
                 await user.send({ embeds: [embed] }).catch(e => logger.warn(`DM failed: ${e.message}`));
             } else {
-                const emojiInline = (safeResult.emoji && gateway.message?.emojiMode !== 'reaction') ? `${safeResult.emoji} ` : '';
-                const text = emojiInline + (safeResult.message || gateway.message?.content || '');
+                const text = applyTemplates(dmText, templates);
                 await user.send(text).catch(e => logger.warn(`DM failed: ${e.message}`));
             }
         }
@@ -658,6 +676,96 @@ export async function handleEmbedPreview(interaction, type) {
         const embed = builder.build(templates);
         await interaction.reply({ embeds: [embed], ephemeral: true });
     } catch (e) { logger.error(`handleEmbedPreview error: ${e.message}`); await interaction.reply({ content: 'Error previewing embed', ephemeral: true }); }
+}
+
+// ============================================================================
+// SYSTEM MANAGEMENT HANDLERS (create/delete/list/configure)
+// ============================================================================
+
+export async function handleSystemCreate(interaction, opts = {}) {
+    try {
+        const guildId = interaction.guildId;
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const existing = cfg.modules?.gateway || {};
+        const gateway = ensureDefaultConfig(existing);
+
+        gateway.systems = gateway.systems || [];
+        if (gateway.systems.length >= 5) return interaction.reply({ content: 'Maximum of 5 systems allowed.', ephemeral: true });
+
+        const id = `sys_${Date.now().toString(36)}`;
+        const system = {
+            id,
+            type: opts.type || 'button',
+            channelId: opts.channelId || null,
+            verifyRoleAdd: null,
+            verifyRoleRemove: null,
+            triggerText: opts.triggerText || null,
+            reactionEmoji: opts.reactionEmoji || null,
+            successMessage: opts.successMessage || 'Verified',
+            failMessage: opts.failMessage || 'Verification failed',
+            alreadyVerifiedMessage: opts.alreadyVerifiedMessage || 'Already verified',
+            dmSuccessMessage: opts.dmSuccessMessage || null,
+            enabled: true,
+        };
+
+        gateway.systems.push(system);
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, gateway } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'System Created', description: `System ${id} created (type: ${system.type})` })], ephemeral: true });
+    } catch (e) { logger.error(`handleSystemCreate error: ${e.message}`); await interaction.reply({ content: 'Error creating system', ephemeral: true }); }
+}
+
+export async function handleSystemDelete(interaction, id) {
+    try {
+        const guildId = interaction.guildId;
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const gateway = ensureDefaultConfig(cfg.modules?.gateway || {});
+        const before = gateway.systems?.length || 0;
+        gateway.systems = (gateway.systems || []).filter(s => s.id !== id);
+        if ((gateway.systems?.length || 0) === before) return interaction.reply({ content: 'No system found with that id', ephemeral: true });
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, gateway } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0xFF6600, title: 'System Deleted', description: `System ${id} removed.` })], ephemeral: true });
+    } catch (e) { logger.error(`handleSystemDelete error: ${e.message}`); await interaction.reply({ content: 'Error deleting system', ephemeral: true }); }
+}
+
+export async function handleSystemList(interaction) {
+    try {
+        const guildId = interaction.guildId;
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const gateway = ensureDefaultConfig(cfg.modules?.gateway || {});
+        const systems = gateway.systems || [];
+        if (!systems.length) return interaction.reply({ content: 'No systems configured.', ephemeral: true });
+
+        const lines = systems.map(s => `• **${s.id}** — type: ${s.type}, channel: ${s.channelId ? `<#${s.channelId}>` : 'Any'}, enabled: ${s.enabled ? 'Yes' : 'No'}`);
+        await interaction.reply({ embeds: [createEmbed({ color: 0x0099FF, title: 'Gateway Systems', description: lines.join('\n') })], ephemeral: true });
+    } catch (e) { logger.error(`handleSystemList error: ${e.message}`); await interaction.reply({ content: 'Error listing systems', ephemeral: true }); }
+}
+
+export async function handleSystemConfigure(interaction, id, field, value) {
+    try {
+        const guildId = interaction.guildId;
+        const cfg = await getGuildConfig(guildId);
+        if (!cfg) return interaction.reply({ content: 'Failed to load configuration', ephemeral: true });
+        const gateway = ensureDefaultConfig(cfg.modules?.gateway || {});
+        const sys = (gateway.systems || []).find(s => s.id === id);
+        if (!sys) return interaction.reply({ content: 'System not found', ephemeral: true });
+
+        // allowed fields
+        const allowed = ['channelId','verifyRoleAdd','verifyRoleRemove','triggerText','reactionEmoji','successMessage','failMessage','alreadyVerifiedMessage','dmSuccessMessage','enabled'];
+        if (!allowed.includes(field)) return interaction.reply({ content: `Unknown field: ${field}`, ephemeral: true });
+
+        // boolean for enabled
+        if (field === 'enabled') {
+            sys.enabled = (value === 'true' || value === true);
+        } else {
+            sys[field] = value;
+        }
+
+        await updateGuildConfig(guildId, { modules: { ...cfg.modules, gateway } });
+        await interaction.reply({ embeds: [createEmbed({ color: 0x00FF00, title: 'System Updated', description: `System ${id} updated: ${field}` })], ephemeral: true });
+    } catch (e) { logger.error(`handleSystemConfigure error: ${e.message}`); await interaction.reply({ content: 'Error configuring system', ephemeral: true }); }
 }
 
 // ============================================================================
