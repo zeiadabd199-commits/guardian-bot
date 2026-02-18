@@ -1,6 +1,7 @@
 import { Events } from 'discord.js';
 import { getGuildConfig, updateGuildConfig } from '../core/database.js';
 import { logger } from '../core/logger.js';
+import trustService from '../core/trustService.js';
 import gatewayModule from '../modules/gateway/index.js';
 import { ensureDefaultConfig } from '../modules/gateway/config.schema.js';
 
@@ -33,16 +34,7 @@ export default {
                 if (message.mentions.everyone) {
                     await message.delete().catch(() => null);
                     logger.security(`@everyone abuse by ${message.author.id} in ${message.guildId}`);
-                    // decrement trust score
-                    try {
-                        const cfg = await getGuildConfig(message.guildId);
-                        const modules = cfg.modules || {};
-                        const trust = modules.trust || { scores: {} };
-                        trust.scores = trust.scores || {};
-                        trust.scores[message.author.id] = (trust.scores[message.author.id] || 0) - 1;
-                        modules.trust = trust;
-                        await updateGuildConfig(message.guildId, { modules });
-                    } catch (e) { logger.warn(`Failed updating trust after mention abuse: ${e.message}`); }
+                    try { await trustService.incrementSuspicion(message.guildId, message.author.id, 'everyone_mention'); } catch (e) { logger.warn(`trust increment failed: ${e.message}`); }
                     return;
                 }
 
@@ -51,15 +43,7 @@ export default {
                 if (totalMentions >= mentionThreshold) {
                     await message.delete().catch(() => null);
                     logger.security(`Mass mention abuse (${totalMentions}) by ${message.author.id} in ${message.guildId}`);
-                    try {
-                        const cfg = await getGuildConfig(message.guildId);
-                        const modules = cfg.modules || {};
-                        const trust = modules.trust || { scores: {} };
-                        trust.scores = trust.scores || {};
-                        trust.scores[message.author.id] = (trust.scores[message.author.id] || 0) - 1;
-                        modules.trust = trust;
-                        await updateGuildConfig(message.guildId, { modules });
-                    } catch (e) { logger.warn(`Failed updating trust after mass mention: ${e.message}`); }
+                    try { await trustService.incrementSuspicion(message.guildId, message.author.id, 'mention_spam'); } catch (e) { logger.warn(`trust increment failed: ${e.message}`); }
                     return;
                 }
             } catch (err) {

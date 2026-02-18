@@ -23,8 +23,19 @@ async function bootstrap() {
                         const ownerPos = ownerMember ? (ownerMember.roles.highest.position || 0) : Infinity;
                         const botPos = botMember.roles.highest.position || 0;
 
-                        if (botPos > ownerPos) {
-                            logger.warn('Role hierarchy unsafe configuration detected');
+                        if (botPos >= ownerPos) {
+                            try {
+                                const { updateGuildConfig } = await import('./core/database.js');
+                                const cfg = await getGuildConfig(guildId);
+                                const modules = (cfg && cfg.modules) ? cfg.modules : {};
+                                modules.security = modules.security || {};
+                                modules.security.roleManagementDisabled = true;
+                                modules.security.destructiveActionsDisabled = true;
+                                await updateGuildConfig(guildId, { modules });
+                            } catch (e) {
+                                logger.warn(`Failed to persist unsafe-hierarchy for ${guildId}: ${e.message}`);
+                            }
+                            logger.security('UNSAFE ROLE HIERARCHY DETECTED', guildId);
                             continue;
                         }
 
@@ -45,7 +56,18 @@ async function bootstrap() {
                                 const role = await guild.roles.fetch(rid).catch(() => null);
                                 if (!role) continue;
                                 if (!(botPos > role.position)) {
-                                    logger.warn('Role hierarchy unsafe configuration detected');
+                                    try {
+                                        const { updateGuildConfig } = await import('./core/database.js');
+                                        const cfg = await getGuildConfig(guildId);
+                                        const modules = (cfg && cfg.modules) ? cfg.modules : {};
+                                        modules.security = modules.security || {};
+                                        modules.security.roleManagementDisabled = true;
+                                        modules.security.destructiveActionsDisabled = true;
+                                        await updateGuildConfig(guildId, { modules });
+                                    } catch (e) {
+                                        logger.warn(`Failed to persist unsafe-hierarchy for ${guildId}: ${e.message}`);
+                                    }
+                                    logger.security('UNSAFE ROLE HIERARCHY DETECTED', guildId);
                                     break;
                                 }
                             } catch (err) {

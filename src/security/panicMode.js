@@ -1,47 +1,53 @@
-import { getGuildConfig, updateGuildConfig } from '../core/database.js';
+import mongoose from 'mongoose';
 import { logger } from '../core/logger.js';
 
-const panicStates = new Map(); // guildId -> { active: bool, level, until }
+const SecurityStateSchema = new mongoose.Schema({
+    guildId: { type: String, required: true, unique: true },
+    panicLevel: { type: String, default: null },
+    updatedAt: { type: Date, default: Date.now },
+});
 
-export async function enablePanic(guildId, level = 'light', durationMinutes = 30) {
-    const until = Date.now() + Math.max(1, durationMinutes) * 60 * 1000;
-    panicStates.set(guildId, { active: true, level, until });
+const SecurityState = mongoose.models.SecurityState || mongoose.model('SecurityState', SecurityStateSchema, 'security_state');
+
+export async function enablePanic(guildId, level = 'light') {
     try {
-        const cfg = await getGuildConfig(guildId);
-        if (!cfg) return;
-        const existing = cfg.modules || {};
-        existing.security = existing.security || {};
-        existing.security.panic = { active: true, level, until };
-        await updateGuildConfig(guildId, { modules: existing });
+        await SecurityState.findOneAndUpdate(
+            { guildId },
+            { $set: { panicLevel: level, updatedAt: new Date() } },
+            { upsert: true, new: true }
+        );
+        logger.security(`Panic mode enabled for ${guildId} (level=${level})`);
+        return true;
     } catch (err) {
-        logger.warn(`Failed persisting panic state for ${guildId}: ${err.message}`);
+        logger.warn(`enablePanic DB error for ${guildId}: ${err.message}`);
+        return false;
     }
-    logger.security(`Panic mode enabled for ${guildId} (level=${level})`);
 }
 
 export async function disablePanic(guildId) {
-    panicStates.delete(guildId);
     try {
-        const cfg = await getGuildConfig(guildId);
-        if (!cfg) return;
-        const existing = cfg.modules || {};
-        existing.security = existing.security || {};
-        existing.security.panic = { active: false };
-        await updateGuildConfig(guildId, { modules: existing });
+        await SecurityState.findOneAndUpdate(
+            { guildId },
+            { $set: { panicLevel: null, updatedAt: new Date() } },
+            { upsert: true }
+        );
+        logger.security(`Panic mode disabled for ${guildId}`);
+        return true;
     } catch (err) {
-        logger.warn(`Failed clearing panic state for ${guildId}: ${err.message}`);
-    }
-    logger.security(`Panic mode disabled for ${guildId}`);
-}
-
-export function isPanicActive(guildId) {
-    const s = panicStates.get(guildId);
-    if (!s) return false;
-    if (s.until && Date.now() > s.until) {
-        panicStates.delete(guildId);
+        logger.warn(`disablePanic DB error for ${guildId}: ${err.message}`);
         return false;
     }
-    return !!s.active;
+}
+
+export async function isPanicActive(guildId) {
+    try {
+        const doc = await SecurityState.findOne({ guildId }).lean();
+        if (!doc || !doc.panicLevel) return false;
+        return true;
+    } catch (err) {
+        logger.warn(`isPanicActive DB error for ${guildId}: ${err.message}`);
+        return false;
+    }
 }
 
 export default {

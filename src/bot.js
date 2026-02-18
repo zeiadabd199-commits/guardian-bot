@@ -35,6 +35,12 @@ export async function startBot() {
     } catch (err) {
         logger.warn(`Failed to initialize antiNukeWatcher: ${err.message}`);
     }
+    try {
+        const webhookGuard = await import('./security/webhookGuard.js');
+        if (webhookGuard && webhookGuard.init) webhookGuard.init(client);
+    } catch (err) {
+        logger.warn(`Failed to initialize webhookGuard: ${err.message}`);
+    }
     
     await client.login(env.TOKEN);
 }

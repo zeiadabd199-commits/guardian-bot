@@ -1,6 +1,6 @@
 import { Events } from 'discord.js';
 import { logger } from '../core/logger.js';
-import panicMode from './panicMode.js';
+import { enablePanic } from './panicMode.js';
 
 // Simple spike detection per guild per event type
 const maps = {
@@ -23,7 +23,8 @@ function record(map, guildId) {
 
 async function panicLock(guildId, reason) {
     try {
-        await panicMode.enablePanic(guildId, 'medium', 15);
+        await enablePanic(guildId, 'full');
+        logger.security('ANTI-NUKE TRIGGERED', guildId);
         logger.security(`Anti-nuke panicLock triggered for ${guildId}: ${reason}`);
     } catch (err) {
         logger.error(`panicLock error: ${err.message}`);

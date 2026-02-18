@@ -28,6 +28,23 @@ export async function loadCommands(client) {
             const commandModule = await import(pathToFileURL(commandFile).href);
             const command = commandModule.default;
             if (!command?.data || !command?.execute) continue;
+
+            // Wrap admin commands with permission guard enforcement
+            if (command.category === 'admin') {
+                const originalExec = command.execute;
+                command.execute = async (...args) => {
+                    const interaction = args[0];
+                    try {
+                        const pg = await import('../core/permissionGuard.js');
+                        await pg.requireManageGuild(interaction);
+                    } catch (err) {
+                        try { if (interaction && interaction.reply) await interaction.reply({ content: 'Insufficient permissions to run this command.', ephemeral: true }); } catch (e) {}
+                        return;
+                    }
+                    return originalExec(...args);
+                };
+            }
+
             client.commands.set(command.data.name, command);
             commands.push(command.data.toJSON());
         } catch (error) {
