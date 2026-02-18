@@ -1,4 +1,5 @@
 import { createEmbed, GatewayEmbedBuilder, createGatewayLogEmbed, createWelcomeEmbed } from '../../utils/embedBuilder.js';
+import eventBus from '../../core/eventBus.js';
 import { getGuildConfig, updateGuildConfig } from '../../core/database.js';
 import { logger } from '../../core/logger.js';
 import { ensureDefaultConfig } from './config.schema.js';
@@ -224,6 +225,11 @@ export async function processVerification(params) {
 
         logger.info(`Gateway score for ${user.id}: ${trustScoreResult.score} (${trustScoreResult.risk})`);
 
+        try {
+            eventBus.emit('gateway.verified', { guildId: guild.id, userId: user.id });
+        } catch (err) {
+            logger.warn(`Failed to emit gateway.verified event: ${err.message}`);
+        }
         return { status: 'success', message: gateway.message?.content || 'Verified', emoji: gateway.message?.emoji?.success };
     } catch (err) {
         logger.error(`processVerification error: ${err.message}`);
