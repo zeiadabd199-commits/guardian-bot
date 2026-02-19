@@ -12,14 +12,14 @@ export async function assertNotInPanic(guildId, actionType) {
         const L = (level || '').toLowerCase();
 
         if (L === 'full') {
-            logger.security('PANIC BLOCKED ACTION', guildId, actionType);
+            logger.security('PANIC BLOCKED', guildId, actionType);
             return false;
         }
 
         if (L === 'medium') {
-            const blocked = new Set(['ROLE_MODIFY', 'CHANNEL_DELETE', 'WEBHOOK_CREATE']);
+            const blocked = new Set(['ROLE_MODIFY', 'CHANNEL_DELETE', 'WEBHOOK_CREATE', 'PERMISSION_UPDATE']);
             if (blocked.has(actionType)) {
-                logger.security('PANIC BLOCKED ACTION', guildId, actionType);
+                logger.security('PANIC BLOCKED', guildId, actionType);
                 return false;
             }
             return true;
@@ -28,7 +28,7 @@ export async function assertNotInPanic(guildId, actionType) {
         if (L === 'light') {
             // light blocks only bulk/mass operations. callers should pass a MASS/BULK variant for bulk ops.
             if (String(actionType).includes('MASS') || String(actionType).includes('BULK')) {
-                logger.security('PANIC BLOCKED ACTION', guildId, actionType);
+                logger.security('PANIC BLOCKED', guildId, actionType);
                 return false;
             }
             return true;
