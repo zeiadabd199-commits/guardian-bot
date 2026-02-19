@@ -1,6 +1,7 @@
 import { Events } from 'discord.js';
 import { logger } from '../core/logger.js';
 import { enablePanic } from './panicMode.js';
+import panicGuard from '../core/panicGuard.js';
 
 // Track recent webhook creations per guild (timestamps of created webhook ids)
 const createdMap = new Map(); // guildId -> [{id, ts}]
@@ -17,6 +18,12 @@ export function init(client, opts = {}) {
             const guild = channel.guild;
             const guildId = guild?.id;
             if (!guildId) return;
+
+            try {
+                if (!(await panicGuard.assertNotInPanic(guildId, 'WEBHOOK_CREATE'))) return;
+            } catch (e) {
+                // ignore
+            }
 
             const webhooks = await guild.fetchWebhooks();
             const prev = createdMap.get(guildId) || [];

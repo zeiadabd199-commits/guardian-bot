@@ -50,6 +50,17 @@ export async function isPanicActive(guildId) {
     }
 }
 
+export async function getPanicLevel(guildId) {
+    try {
+        const doc = await SecurityState.findOne({ guildId }).lean();
+        if (!doc) return null;
+        return doc.panicLevel || null;
+    } catch (err) {
+        logger.warn(`getPanicLevel DB error for ${guildId}: ${err.message}`);
+        return null;
+    }
+}
+
 export default {
     enablePanic,
     disablePanic,

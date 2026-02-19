@@ -21,6 +21,12 @@ export default {
 
             // Assign auto-roles
             if (gateway.autoRoleOnJoin?.enabled) {
+                try {
+                    const panicGuard = await import('../core/panicGuard.js');
+                    if (!(await panicGuard.assertNotInPanic(member.guild.id, 'GATEWAY_ROLE_ASSIGN'))) return;
+                } catch (e) {
+                    // non-fatal
+                }
                 await gatewayModule.assignAutoRoles(member, gateway);
             }
 

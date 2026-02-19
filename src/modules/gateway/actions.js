@@ -2,6 +2,7 @@ import { createEmbed, GatewayEmbedBuilder, createGatewayLogEmbed, createWelcomeE
 import eventBus from '../../core/eventBus.js';
 import { getGuildConfig, updateGuildConfig } from '../../core/database.js';
 import { logger } from '../../core/logger.js';
+import panicGuard from '../../core/panicGuard.js';
 import { ensureDefaultConfig } from './config.schema.js';
 import { calculateGatewayTrustScore } from './trustScore.js';
 import * as embedTemplates from '../embedTemplates/service.js';
@@ -140,7 +141,10 @@ export async function processVerification(params) {
             const addRoleId = system.verifyRoleAdd || gateway.roles?.verifiedRoleId;
             if (addRoleId) {
                 const vr = await guild.roles.fetch(addRoleId).catch(() => null);
-                if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(`Failed adding bypass verified role: ${e.message}`));
+                if (vr && !member.roles.cache.has(vr.id)) {
+                    if (!(await panicGuard.assertNotInPanic(guild.id, 'GATEWAY_ROLE_ASSIGN'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                    await member.roles.add(vr).catch(e => logger.error(`Failed adding bypass verified role: ${e.message}`));
+                }
             }
             const updated = [...(gateway.introducedUsers || []), user.id];
             await updateGuildConfig(guild.id, { modules: { ...cfg.modules, gateway: { ...gateway, introducedUsers: updated } } });
@@ -191,11 +195,17 @@ export async function processVerification(params) {
         // New account and suspicious roles (legacy behavior preserved)
         if (member && gateway.roles?.newAccountRoleId && accountAgeDays < 7) {
             const nr = await guild.roles.fetch(gateway.roles.newAccountRoleId).catch(() => null);
-            if (nr && !member.roles.cache.has(nr.id)) await member.roles.add(nr).catch(e => logger.error(e.message));
+            if (nr && !member.roles.cache.has(nr.id)) {
+                if (!(await panicGuard.assertNotInPanic(guild.id, 'GATEWAY_ROLE_ASSIGN'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                await member.roles.add(nr).catch(e => logger.error(e.message));
+            }
         }
         if (member && gateway.roles?.suspiciousRoleId && accountAgeDays < ((sec.minAccountAgeDays || 0) * 2)) {
             const sr = await guild.roles.fetch(gateway.roles.suspiciousRoleId).catch(() => null);
-            if (sr && !member.roles.cache.has(sr.id)) await member.roles.add(sr).catch(e => logger.error(e.message));
+            if (sr && !member.roles.cache.has(sr.id)) {
+                if (!(await panicGuard.assertNotInPanic(guild.id, 'GATEWAY_ROLE_ASSIGN'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                await member.roles.add(sr).catch(e => logger.error(e.message));
+            }
         }
 
         // Assign verify role defined on the system or fallback to legacy
@@ -203,7 +213,10 @@ export async function processVerification(params) {
             const addRoleId = system.verifyRoleAdd || gateway.roles?.verifiedRoleId;
             if (addRoleId) {
                 const vr = await guild.roles.fetch(addRoleId).catch(() => null);
-                if (vr && !member.roles.cache.has(vr.id)) await member.roles.add(vr).catch(e => logger.error(e.message));
+                if (vr && !member.roles.cache.has(vr.id)) {
+                    if (!(await panicGuard.assertNotInPanic(guild.id, 'GATEWAY_ROLE_ASSIGN'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                    await member.roles.add(vr).catch(e => logger.error(e.message));
+                }
             }
         }
 
@@ -211,11 +224,17 @@ export async function processVerification(params) {
         if (member) {
             if (gateway.roles?.suspiciousRoleId) {
                 const sr = await guild.roles.fetch(gateway.roles.suspiciousRoleId).catch(() => null);
-                if (sr && member.roles.cache.has(sr.id)) await member.roles.remove(sr).catch(e => logger.error(e.message));
+                if (sr && member.roles.cache.has(sr.id)) {
+                    if (!(await panicGuard.assertNotInPanic(guild.id, 'ROLE_MODIFY'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                    await member.roles.remove(sr).catch(e => logger.error(e.message));
+                }
             }
             if (gateway.roles?.newAccountRoleId) {
                 const nr = await guild.roles.fetch(gateway.roles.newAccountRoleId).catch(() => null);
-                if (nr && member.roles.cache.has(nr.id)) await member.roles.remove(nr).catch(e => logger.error(e.message));
+                if (nr && member.roles.cache.has(nr.id)) {
+                    if (!(await panicGuard.assertNotInPanic(guild.id, 'ROLE_MODIFY'))) return { status: 'blocked_panic', message: 'Action blocked by panic mode' };
+                    await member.roles.remove(nr).catch(e => logger.error(e.message));
+                }
             }
         }
 
@@ -471,6 +490,7 @@ export async function assignAutoRoles(member, config) {
         for (const roleId of gateway.autoRoleOnJoin.roleIds) {
             const role = await member.guild?.roles.fetch(roleId).catch(() => null);
             if (role && !member.roles.cache.has(role.id)) {
+                if (!(await panicGuard.assertNotInPanic(member.guild.id, 'GATEWAY_ROLE_ASSIGN'))) return;
                 await member.roles.add(role).catch(e => logger.warn(`Failed to assign auto-role ${roleId}: ${e.message}`));
             }
         }
