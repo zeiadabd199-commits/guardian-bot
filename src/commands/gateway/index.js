@@ -1,5 +1,5 @@
 import { SlashCommandBuilder } from 'discord.js';
-import gatewayModule from '../../modules/gateway/index.js';
+import gatewayModule from '../../modules/gateway_v4/index.js';
 
 export default {
     data: new SlashCommandBuilder()
@@ -230,6 +230,23 @@ export default {
                         .setDescription('Manually lock the gateway')
                         .addNumberOption(opt =>
                             opt
+        .addSubcommand(sub =>
+            sub
+                .setName('setup')
+                .setDescription('Interactive setup for a slot')
+                .addStringOption(opt => opt.setName('slot').setDescription('Slot to setup (A/B/C/D)').setRequired(true))
+        )
+        .addSubcommand(sub =>
+            sub
+                .setName('bind')
+                .setDescription('Bind channel/role/templates to a slot')
+                .addStringOption(opt => opt.setName('slot').setDescription('Slot to bind (A/B/C/D)').setRequired(true))
+                .addChannelOption(opt => opt.setName('channel').setDescription('Channel to bind').setRequired(false))
+                .addRoleOption(opt => opt.setName('role').setDescription('Role to grant').setRequired(false))
+                .addStringOption(opt => opt.setName('success_template').setDescription('Template ID for success').setRequired(false))
+                .addStringOption(opt => opt.setName('fail_template').setDescription('Template ID for failure').setRequired(false))
+                .addStringOption(opt => opt.setName('exists_template').setDescription('Template ID for exists').setRequired(false))
+        )
                                 .setName('minutes')
                                 .setDescription('Lock duration in minutes')
                                 .setRequired(false)

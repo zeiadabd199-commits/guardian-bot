@@ -1,5 +1,5 @@
 import { SlashCommandBuilder } from 'discord.js';
-import gatewayModule from '../../modules/gateway/index.js';
+import gatewayModule from '../../modules/gateway_v4/index.js';
 
 export default {
     data: new SlashCommandBuilder()
