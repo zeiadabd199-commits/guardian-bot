@@ -1,70 +1,31 @@
-import fs from 'fs';
-import path from 'path';
-import { REST, Routes } from 'discord.js';
-import { pathToFileURL } from 'url';
-import { fileURLToPath } from 'url';
-import { env } from '../config/environment.js';
+import fs from "fs";
+import path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export async function loadCommands(client) {
-    const commands = [];
-    const commandsPath = path.join(__dirname, '..', 'commands');
-    if (!fs.existsSync(commandsPath)) return;
+export default async function loadCommands(client) {
+      const commandsPath = path.join(__dirname, "../commands");
+        if (!fs.existsSync(commandsPath)) return;
+          const folders = fs.readdirSync(commandsPath);
 
-    const entries = fs.readdirSync(commandsPath);
+            // Load all commands concurrently
+              const importPromises = folders.map(folder => {
+                    const commandPath = path.join(commandsPath, folder, "index.js");
+                        return import(pathToFileURL(commandPath).href).catch(err => {
+                                    console.error(`[Loader] Failed to load command ${folder}:`, err.message);
+                                            return null;
+                        });
+              });
 
-    for (const entry of entries) {
-        const entryPath = path.join(commandsPath, entry);
-        const stat = fs.statSync(entryPath);
+                const loadedCommands = await Promise.all(importPromises);
+                  let count = 0;
 
-        // Only load directory/index.js files to avoid accidental command files
-        if (!stat.isDirectory()) continue;
-
-        const commandFile = path.join(entryPath, 'index.js');
-        if (!fs.existsSync(commandFile)) continue;
-
-        try {
-            const commandModule = await import(pathToFileURL(commandFile).href);
-            const command = commandModule.default;
-            if (!command?.data || !command?.execute) continue;
-
-            // Wrap admin commands with permission guard enforcement
-            if (command.category === 'admin') {
-                const originalExec = command.execute;
-                command.execute = async (...args) => {
-                    const interaction = args[0];
-                    try {
-                        const pg = await import('../core/permissionGuard.js');
-                        await pg.requireManageGuild(interaction);
-                    } catch (err) {
-                        try { if (interaction && interaction.reply) await interaction.reply({ content: 'Insufficient permissions to run this command.', ephemeral: true }); } catch (e) {}
-                        return;
+                    for (const commandModule of loadedCommands) {
+                            if (commandModule?.default?.data) {
+                                        client.commands.set(commandModule.default.data.name, commandModule.default);
+                                                count++;
+                            }
                     }
-                    return originalExec(...args);
-                };
-            }
-
-            client.commands.set(command.data.name, command);
-            commands.push(command.data.toJSON());
-        } catch (error) {
-            console.error(`[Guardian] Error loading command from ${entry}:`, error);
-        }
-    }
-
-    console.log(`[Guardian] Loaded ${client.commands.size} commands.`);
-
-    const rest = new REST({ version: '10' }).setToken(env.TOKEN);
-
-    try {
-        console.log('[Guardian] Registering guild commands...');
-        await rest.put(
-            Routes.applicationGuildCommands(env.CLIENT_ID, env.GUILD_ID),
-            { body: commands }
-        );
-
-        console.log('[Guardian] Guild slash commands updated.');
-    } catch (error) {
-        console.error('[Guardian] Command registration error:', error);
-    }
+                      console.log(`[System] Successfully loaded ${count} commands in parallel.`);
 }
