@@ -17,8 +17,9 @@ const GuildConfigSchema = new Schema(
                                     gateway: {
                                           enabled: { type: Boolean, required: true, default: false },
                                                 type: { type: String, enum: GATEWAY_TYPES, required: true, default: 'BUTTON' },
-                                                      verifiedRoleId: { type: String, default: null },
-                                                            logChannelId: { type: String, default: null },
+                                                    verifiedRoleId: { type: String, default: null },
+                                                        logChannelId: { type: String, default: null },
+                                                        settings: { type: Schema.Types.Mixed, default: {} },
                                                                 },
 
                                                                     tickets: {
