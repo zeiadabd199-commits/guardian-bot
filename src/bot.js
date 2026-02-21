@@ -1,8 +1,8 @@
 import { Client, GatewayIntentBits, Collection } from 'discord.js';
 import { env } from './config/environment.js';
-import { loadEvents } from './loaders/events.js';
-import { loadCommands } from './loaders/commands.js';
-import { loadModules } from './loaders/modules.js';
+import loadEvents from './loaders/events.js';
+import loadCommands from './loaders/commands.js';
+import loadModules from './loaders/modules.js';
 import { connectDatabase } from './core/database.js';
 import { logger } from './core/logger.js';
 

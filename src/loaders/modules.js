@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export async function loadModules(client) {
+export default async function loadModules(client) {
     const modulesPath = path.join(__dirname, '..', 'modules');
     const moduleFolders = fs.readdirSync(modulesPath);
 
